@@ -5,7 +5,7 @@ export interface Condition {
 }
 
 export interface Action {
-  type: 'assign_day' | 'assign_days' | 'assign_truck' | 'set_priority' | 'block' | 'set_delivery_time' | 'set_area'
+  type: 'assign_day' | 'assign_days' | 'assign_truck' | 'set_priority' | 'block' | 'set_delivery_time' | 'set_area' | 'set_run_weight_limit'
   value: string | number
 }
 
@@ -141,4 +141,43 @@ export function parseRule(rule: {
 export function orderMatchesDay(scheduledDay: string | null | undefined, day: string): boolean {
   if (!scheduledDay) return false
   return scheduledDay.split(',').map((d) => d.trim()).includes(day)
+}
+
+/**
+ * Evaluate all active route_weight_limit rules against the batch of orders being routed.
+ * A rule applies if it has no conditions, OR if any order in the batch matches its conditions.
+ * Returns the lowest applicable weight limit in kg, or null if no rules apply.
+ * The route generator should use min(truck.capacity, routeWeightLimit) for bin-packing.
+ */
+export function getRouteWeightLimit(
+  rules: ParsedRule[],
+  orders: OrderForRules[]
+): number | null {
+  const limitRules = rules.filter(
+    (r) => r.active && r.actions.some((a) => a.type === 'set_run_weight_limit')
+  )
+
+  if (limitRules.length === 0) return null
+
+  let minLimit: number | null = null
+
+  for (const rule of limitRules) {
+    // No conditions = always applies. Otherwise: applies if ANY order matches.
+    const applies =
+      rule.conditions.length === 0 ||
+      orders.some((o) => conditionsMatch(o, rule.conditions, rule.conditionLogic))
+
+    if (!applies) continue
+
+    for (const action of rule.actions) {
+      if (action.type === 'set_run_weight_limit') {
+        const limit = Number(action.value)
+        if (!isNaN(limit) && (minLimit === null || limit < minLimit)) {
+          minLimit = limit
+        }
+      }
+    }
+  }
+
+  return minLimit
 }

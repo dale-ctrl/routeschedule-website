@@ -53,6 +53,7 @@ const OPERATORS = [
 const ACTION_TYPES = [
   { value: 'assign_day', label: 'Assign to single day' },
   { value: 'assign_days', label: 'Assign to multiple allowed days' },
+  { value: 'set_run_weight_limit', label: 'Set max weight per truck run (kg)' },
   { value: 'set_area', label: 'Set area label' },
   { value: 'set_priority', label: 'Set priority (0–10)' },
   { value: 'set_delivery_time', label: 'Set delivery time' },
@@ -63,7 +64,8 @@ const DAYS = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'
 
 const RULE_TYPES = [
   { value: 'area_day', label: 'Area / Day Assignment' },
-  { value: 'weight', label: 'Weight Rule' },
+  { value: 'route_weight_limit', label: 'Route Weight Limit (per truck run)' },
+  { value: 'weight', label: 'Order Weight Rule' },
   { value: 'time_window', label: 'Time Window' },
   { value: 'priority', label: 'Priority Rule' },
   { value: 'block', label: 'Block Rule' },
@@ -378,6 +380,19 @@ export default function RulesPage() {
                       </select>
                     ) : action.type === 'block' ? (
                       <span className="flex-1 text-sm text-gray-500 px-2">Order will not be scheduled</span>
+                    ) : action.type === 'set_run_weight_limit' ? (
+                      <div className="flex-1 flex items-center gap-2">
+                        <input
+                          type="number"
+                          min="0"
+                          step="100"
+                          className="flex-1 px-2 py-1.5 text-sm border border-gray-300 rounded-lg bg-white"
+                          placeholder="e.g. 6000"
+                          value={action.value}
+                          onChange={(e) => updateAction(i, 'value', e.target.value)}
+                        />
+                        <span className="text-sm text-gray-500 shrink-0">kg max per truck run</span>
+                      </div>
                     ) : (
                       <input className="flex-1 px-2 py-1.5 text-sm border border-gray-300 rounded-lg bg-white" placeholder="Value" value={action.value} onChange={(e) => updateAction(i, 'value', e.target.value)} />
                     )}

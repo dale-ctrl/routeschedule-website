@@ -1,6 +1,7 @@
 import { prisma } from '@/lib/prisma'
 import { assignToTrucks, optimizeStopOrder } from '@/lib/route-optimizer'
 import { getRouteDetails } from '@/lib/google-maps'
+import { parseRule, getRouteWeightLimit } from '@/lib/rules-engine'
 
 export async function POST(request: Request) {
   const body = await request.json()
@@ -42,6 +43,29 @@ export async function POST(request: Request) {
     return Response.json({ error: 'No active trucks available' }, { status: 400 })
   }
 
+  // Evaluate route-level weight limit rules against this batch of orders
+  const allRules = await prisma.rule.findMany({ where: { active: true } })
+  const parsedRules = allRules.map(parseRule)
+  const ordersForRules = orders.map((o) => ({
+    id: o.id,
+    postcode: o.postcode,
+    area: o.area,
+    weight: o.weight,
+    customer: o.customer,
+    notes: o.notes,
+    reference: o.reference,
+    deliveryTime: o.deliveryTime,
+    scheduledDay: o.scheduledDay,
+    priority: o.priority,
+  }))
+  const routeWeightLimit = getRouteWeightLimit(parsedRules, ordersForRules)
+
+  // Apply route weight limit: cap each truck's effective capacity
+  const trucksWithLimit = trucks.map((t) => ({
+    ...t,
+    capacity: routeWeightLimit !== null ? Math.min(t.capacity, routeWeightLimit) : t.capacity,
+  }))
+
   const stops = orders.map((o) => ({
     id: o.id,
     lat: o.lat!,
@@ -54,7 +78,7 @@ export async function POST(request: Request) {
     priority: o.priority,
   }))
 
-  const assignments = assignToTrucks(stops, trucks)
+  const assignments = assignToTrucks(stops, trucksWithLimit)
   const createdRoutes = []
 
   for (const assignment of assignments) {
@@ -110,5 +134,9 @@ export async function POST(request: Request) {
     createdRoutes.push({ routeId: route.id, routeName, stops: orderedStops.length })
   }
 
-  return Response.json({ routes: createdRoutes, total: createdRoutes.length })
+  return Response.json({
+    routes: createdRoutes,
+    total: createdRoutes.length,
+    routeWeightLimitApplied: routeWeightLimit,
+  })
 }
