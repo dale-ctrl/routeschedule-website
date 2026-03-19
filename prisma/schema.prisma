@@ -1,0 +1,98 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client"
+  output   = "../app/generated/prisma"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+model Truck {
+  id           String      @id @default(cuid())
+  name         String
+  registration String?
+  capacity     Float       @default(7500)
+  type         String      @default("12T DAF")
+  active       Boolean     @default(true)
+  notes        String?
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+  routes       Route[]
+  routeStops   RouteStop[]
+}
+
+model Order {
+  id           String      @id @default(cuid())
+  reference    String?
+  customer     String
+  postcode     String
+  address      String?
+  weight       Float       @default(0)
+  notes        String?
+  area         String?
+  lat          Float?
+  lng          Float?
+  status       String      @default("pending")
+  scheduledDay String?
+  importBatch  String?
+  deliveryTime String?
+  priority     Int         @default(0)
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+  routeStops   RouteStop[]
+}
+
+model Route {
+  id            String      @id @default(cuid())
+  name          String
+  date          DateTime
+  truck         Truck       @relation(fields: [truckId], references: [id])
+  truckId       String
+  status        String      @default("planned")
+  totalWeight   Float       @default(0)
+  totalDistance Float?
+  totalDuration Int?
+  notes         String?
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+  stops         RouteStop[]
+}
+
+model RouteStop {
+  id        String    @id @default(cuid())
+  route     Route     @relation(fields: [routeId], references: [id], onDelete: Cascade)
+  routeId   String
+  order     Order     @relation(fields: [orderId], references: [id])
+  orderId   String
+  truck     Truck     @relation(fields: [truckId], references: [id])
+  truckId   String
+  sequence  Int
+  eta       DateTime?
+  duration  Int?
+  distance  Float?
+  notes     String?
+  createdAt DateTime  @default(now())
+}
+
+model Rule {
+  id          String   @id @default(cuid())
+  name        String
+  description String?
+  type        String
+  conditions  String
+  actions     String
+  priority    Int      @default(0)
+  active      Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model Setting {
+  id        String   @id @default(cuid())
+  key       String   @unique
+  value     String
+  updatedAt DateTime @updatedAt
+}
