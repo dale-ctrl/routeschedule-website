@@ -14,14 +14,16 @@ export async function POST(request: Request) {
     return Response.json({ error: 'day and date are required' }, { status: 400 })
   }
 
-  // Get pending orders for the day
-  const orders = await prisma.order.findMany({
-    where: {
-      scheduledDay: day,
-      status: 'pending',
-      lat: { not: null },
-      lng: { not: null },
-    },
+  // Fetch all pending geocoded orders and filter by day.
+  // scheduledDay may be a single day ("tuesday") or comma-separated ("tuesday,friday")
+  // so we include any order whose allowed days include the requested day.
+  const allPending = await prisma.order.findMany({
+    where: { status: 'pending', lat: { not: null }, lng: { not: null } },
+  })
+
+  const orders = allPending.filter((o) => {
+    if (!o.scheduledDay) return false
+    return o.scheduledDay.split(',').map((d) => d.trim()).includes(day)
   })
 
   if (orders.length === 0) {
@@ -59,11 +61,9 @@ export async function POST(request: Request) {
     const truck = trucks.find((t) => t.id === assignment.truckId)!
     const orderedStops = optimizeStopOrder(assignment.stops)
 
-    // Get depot setting (default: use centroid of stops)
     const centLat = orderedStops.reduce((s, st) => s + st.lat, 0) / orderedStops.length
     const centLng = orderedStops.reduce((s, st) => s + st.lng, 0) / orderedStops.length
 
-    // Try to get real route details from Google Maps
     let routeDetails = null
     if (orderedStops.length > 0) {
       const origin = { lat: centLat, lng: centLng }
@@ -86,7 +86,6 @@ export async function POST(request: Request) {
       },
     })
 
-    // Create route stops
     const stopCreates = orderedStops.map((stop, idx) => {
       const leg = routeDetails?.legs[idx]
       return prisma.routeStop.create({
@@ -103,7 +102,6 @@ export async function POST(request: Request) {
 
     await prisma.$transaction(stopCreates)
 
-    // Mark orders as scheduled
     await prisma.order.updateMany({
       where: { id: { in: orderedStops.map((s) => s.id) } },
       data: { status: 'scheduled' },

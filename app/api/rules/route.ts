@@ -12,6 +12,7 @@ export async function POST(request: Request) {
       name: body.name,
       description: body.description ?? null,
       type: body.type,
+      conditionLogic: body.conditionLogic === 'OR' ? 'OR' : 'AND',
       conditions: JSON.stringify(body.conditions ?? []),
       actions: JSON.stringify(body.actions ?? []),
       priority: body.priority ?? 0,

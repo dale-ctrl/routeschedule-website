@@ -16,6 +16,7 @@ export async function PUT(req: Request, { params }: { params: Promise<{ id: stri
       name: body.name,
       description: body.description,
       type: body.type,
+      conditionLogic: body.conditionLogic === 'OR' ? 'OR' : 'AND',
       conditions: JSON.stringify(body.conditions ?? []),
       actions: JSON.stringify(body.actions ?? []),
       priority: body.priority ?? 0,

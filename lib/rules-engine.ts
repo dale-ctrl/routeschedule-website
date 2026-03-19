@@ -5,7 +5,7 @@ export interface Condition {
 }
 
 export interface Action {
-  type: 'assign_day' | 'assign_truck' | 'set_priority' | 'block' | 'set_delivery_time' | 'set_area'
+  type: 'assign_day' | 'assign_days' | 'assign_truck' | 'set_priority' | 'block' | 'set_delivery_time' | 'set_area'
   value: string | number
 }
 
@@ -13,6 +13,7 @@ export interface ParsedRule {
   id: string
   name: string
   type: string
+  conditionLogic: 'AND' | 'OR'
   conditions: Condition[]
   actions: Action[]
   priority: number
@@ -60,6 +61,14 @@ function evaluateCondition(order: OrderForRules, condition: Condition): boolean 
   }
 }
 
+function conditionsMatch(order: OrderForRules, conditions: Condition[], logic: 'AND' | 'OR'): boolean {
+  if (conditions.length === 0) return true
+  if (logic === 'OR') {
+    return conditions.some((c) => evaluateCondition(order, c))
+  }
+  return conditions.every((c) => evaluateCondition(order, c))
+}
+
 export function applyRules(
   orders: OrderForRules[],
   rules: ParsedRule[]
@@ -72,12 +81,20 @@ export function applyRules(
     let updated = { ...order }
 
     for (const rule of sortedRules) {
-      const allMatch = rule.conditions.every((c) => evaluateCondition(updated, c))
-      if (!allMatch) continue
+      const matches = conditionsMatch(updated, rule.conditions, rule.conditionLogic)
+      if (!matches) continue
 
       for (const action of rule.actions) {
         switch (action.type) {
           case 'assign_day':
+            // Only assign if not already assigned
+            if (!updated.scheduledDay) {
+              updated.scheduledDay = String(action.value)
+            }
+            break
+          case 'assign_days':
+            // Store multiple allowed days (comma-separated), e.g. "tuesday,friday"
+            // Only assign if not already assigned
             if (!updated.scheduledDay) {
               updated.scheduledDay = String(action.value)
             }
@@ -102,10 +119,26 @@ export function applyRules(
   })
 }
 
-export function parseRule(rule: { conditions: string; actions: string; id: string; name: string; type: string; priority: number; active: boolean }): ParsedRule {
+export function parseRule(rule: {
+  conditions: string
+  actions: string
+  id: string
+  name: string
+  type: string
+  conditionLogic: string
+  priority: number
+  active: boolean
+}): ParsedRule {
   return {
     ...rule,
+    conditionLogic: (rule.conditionLogic === 'OR' ? 'OR' : 'AND') as 'AND' | 'OR',
     conditions: JSON.parse(rule.conditions) as Condition[],
     actions: JSON.parse(rule.actions) as Action[],
   }
+}
+
+/** Check if a scheduledDay value includes a given day (supports comma-separated multi-day) */
+export function orderMatchesDay(scheduledDay: string | null | undefined, day: string): boolean {
+  if (!scheduledDay) return false
+  return scheduledDay.split(',').map((d) => d.trim()).includes(day)
 }
