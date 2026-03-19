@@ -1,6 +1,6 @@
 import { prisma } from '@/lib/prisma'
 import { assignToTrucks, optimizeStopOrder } from '@/lib/route-optimizer'
-import { getRouteDetails } from '@/lib/google-maps'
+import { getRouteDetails } from '@/lib/routing'
 import { parseRule, getRouteWeightLimit } from '@/lib/rules-engine'
 
 export async function POST(request: Request) {

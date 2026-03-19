@@ -1,6 +1,6 @@
 import { prisma } from '@/lib/prisma'
 import { applyRules, parseRule } from '@/lib/rules-engine'
-import { geocodePostcode } from '@/lib/google-maps'
+import { geocodePostcodesBulk } from '@/lib/routing'
 
 export async function POST(request: Request) {
   const body = await request.json()
@@ -56,14 +56,9 @@ export async function POST(request: Request) {
     area: rulesResult[i].area ?? orig.area,
   }))
 
-  // Geocode postcodes (batch, don't block on failure)
-  const geocodedMap = new Map<string, { lat: number; lng: number }>()
+  // Bulk geocode all postcodes in one API call (postcodes.io, free, up to 100 per request)
   const uniquePostcodes = [...new Set(withRules.map((o) => o.postcode))]
-
-  for (const pc of uniquePostcodes) {
-    const geo = await geocodePostcode(pc)
-    if (geo) geocodedMap.set(pc, { lat: geo.lat, lng: geo.lng })
-  }
+  const geocodedMap = await geocodePostcodesBulk(uniquePostcodes)
 
   // Create orders in DB
   const created = await prisma.$transaction(

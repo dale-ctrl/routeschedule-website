@@ -1,5 +1,5 @@
 import { prisma } from '@/lib/prisma'
-import { geocodePostcode } from '@/lib/google-maps'
+import { geocodePostcode } from '@/lib/routing'
 
 export async function POST(request: Request) {
   const body = await request.json()

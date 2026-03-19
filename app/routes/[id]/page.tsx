@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useState, use } from 'react'
+import dynamic from 'next/dynamic'
 import { PageHeader } from '@/components/ui/PageHeader'
 import { Button } from '@/components/ui/Button'
 import { statusBadge } from '@/components/ui/Badge'
@@ -8,6 +9,12 @@ import { formatWeight, formatDuration, formatDistance } from '@/lib/utils'
 import { ArrowLeft, MapPin, Clock, Weight, Truck as TruckIcon } from 'lucide-react'
 import Link from 'next/link'
 import { format } from 'date-fns'
+
+// Leaflet must be client-side only (uses window)
+const RouteMap = dynamic(
+  () => import('@/components/ui/RouteMap').then((m) => m.RouteMap),
+  { ssr: false, loading: () => <div className="h-80 flex items-center justify-center text-gray-400 text-sm">Loading map...</div> }
+)
 
 interface Stop {
   id: string
@@ -50,7 +57,6 @@ export default function RouteDetailPage({ params }: { params: Promise<{ id: stri
   const { id } = use(params)
   const [route, setRoute] = useState<RouteDetail | null>(null)
   const [loading, setLoading] = useState(true)
-  const apiKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY
 
   useEffect(() => {
     fetch(`/api/routes/${id}`)
@@ -62,9 +68,19 @@ export default function RouteDetailPage({ params }: { params: Promise<{ id: stri
   if (loading) return <div className="flex-1 flex items-center justify-center text-gray-400">Loading route...</div>
   if (!route) return <div className="flex-1 flex items-center justify-center text-gray-400">Route not found.</div>
 
-  const geocodedStops = route.stops.filter((s) => s.order.lat && s.order.lng)
-  const mapsUrl = geocodedStops.length > 0
-    ? `https://www.google.com/maps/dir/${geocodedStops.map((s) => `${s.order.lat},${s.order.lng}`).join('/')}`
+  const geocodedStops = route.stops
+    .filter((s) => s.order.lat && s.order.lng)
+    .map((s) => ({
+      lat: s.order.lat!,
+      lng: s.order.lng!,
+      sequence: s.sequence,
+      customer: s.order.customer,
+      postcode: s.order.postcode,
+    }))
+
+  // Build an OSM-based directions URL as fallback link
+  const osmUrl = geocodedStops.length > 0
+    ? `https://www.openstreetmap.org/directions?engine=osrm_car&route=${geocodedStops.map((s) => `${s.lat},${s.lng}`).join(';')}`
     : null
 
   return (
@@ -74,9 +90,9 @@ export default function RouteDetailPage({ params }: { params: Promise<{ id: stri
         subtitle={format(new Date(route.date), 'EEEE, d MMMM yyyy')}
         actions={
           <>
-            {mapsUrl && (
-              <a href={mapsUrl} target="_blank" rel="noopener noreferrer">
-                <Button variant="secondary" size="sm">Open in Google Maps</Button>
+            {osmUrl && (
+              <a href={osmUrl} target="_blank" rel="noopener noreferrer">
+                <Button variant="secondary" size="sm">Open in Maps</Button>
               </a>
             )}
             <Link href="/routes">
@@ -132,21 +148,17 @@ export default function RouteDetailPage({ params }: { params: Promise<{ id: stri
             </div>
           </div>
 
-          {/* Map embed */}
+          {/* Map */}
           <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
             <div className="px-5 py-4 border-b border-gray-100">
               <h2 className="font-semibold text-gray-900">Route Map</h2>
             </div>
-            {apiKey && apiKey !== 'YOUR_GOOGLE_MAPS_API_KEY_HERE' && geocodedStops.length > 0 ? (
-              <RouteMapEmbed stops={geocodedStops} apiKey={apiKey} />
+            {geocodedStops.length > 0 ? (
+              <RouteMap stops={geocodedStops} />
             ) : (
-              <div className="flex flex-col items-center justify-center h-64 text-gray-400 text-sm gap-2">
+              <div className="flex flex-col items-center justify-center h-80 text-gray-400 text-sm gap-2">
                 <MapPin size={32} className="text-gray-300" />
-                {!apiKey || apiKey === 'YOUR_GOOGLE_MAPS_API_KEY_HERE'
-                  ? 'Add your Google Maps API key in Settings to see the map.'
-                  : geocodedStops.length === 0
-                  ? 'No geocoded stops. Run Geocode from the Orders page.'
-                  : ''}
+                No geocoded stops — run Geocode from the Orders page.
               </div>
             )}
           </div>
@@ -166,25 +178,5 @@ function SummaryCard({ icon, label, value, sub }: { icon: React.ReactNode; label
       <div className="text-xl font-bold text-gray-900">{value}</div>
       <div className="text-xs text-gray-400 mt-1">{sub}</div>
     </div>
-  )
-}
-
-function RouteMapEmbed({ stops, apiKey }: { stops: Stop[]; apiKey: string }) {
-  const coords = stops.map((s) => `${s.order.lat},${s.order.lng}`).join('|')
-  // Use Google Maps Embed API with waypoints
-  const origin = `${stops[0].order.lat},${stops[0].order.lng}`
-  const dest = `${stops[stops.length - 1].order.lat},${stops[stops.length - 1].order.lng}`
-  const waypoints = stops.slice(1, -1).map((s) => `${s.order.lat},${s.order.lng}`).join('|')
-
-  const src = `https://www.google.com/maps/embed/v1/directions?key=${apiKey}&origin=${origin}&destination=${dest}${waypoints ? `&waypoints=${waypoints}` : ''}&mode=driving`
-
-  return (
-    <iframe
-      src={src}
-      className="w-full h-80"
-      allowFullScreen
-      referrerPolicy="no-referrer-when-downgrade"
-      title="Route Map"
-    />
   )
 }
