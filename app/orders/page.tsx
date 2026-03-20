@@ -126,6 +126,10 @@ export default function OrdersPage() {
         body: JSON.stringify({ rows: normalised }),
       })
       const data = await res.json()
+      if (!res.ok) {
+        setImportResult(`Import failed: ${data.error ?? 'Unknown server error'}`)
+        return
+      }
       setImportResult(`Imported ${data.imported} orders. Geocoded: ${data.geocoded}`)
       fetchOrders()
     } catch (err) {
