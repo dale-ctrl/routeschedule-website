@@ -111,12 +111,12 @@ export default function OrdersPage() {
         return {
           customer: get('customer', 'company', 'name', 'customer name'),
           postcode: get('postcode', 'post code', 'zip', 'postal code'),
-          weight: get('weight', 'weight (kg)', 'kg', 'weight kg'),
-          reference: get('reference', 'ref', 'order ref', 'order number', 'po'),
+          weight: get('weight', 'weight (kg)', 'weight(kg)', 'kg', 'weight kg'),
+          reference: get('reference', 'ref', 'order ref', 'order number', 'job number', 'po'),
           address: get('address', 'delivery address', 'addr'),
           notes: get('notes', 'note', 'comments', 'comment'),
           area: get('area', 'region', 'zone', 'area location'),
-          deliveryTime: get('delivery time', 'time', 'am/pm', 'window'),
+          deliveryTime: get('delivery time', 'deliverytime', 'time', 'am/pm', 'window', 'slot'),
         }
       }).filter((r) => r.customer || r.postcode)
 

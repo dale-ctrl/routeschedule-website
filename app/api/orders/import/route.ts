@@ -28,21 +28,37 @@ export async function POST(request: Request) {
 
     const batchId = `import-${Date.now()}`
 
+    // Helper: convert empty/whitespace strings to null
+    const str = (v: unknown) => {
+      const s = String(v ?? '').trim()
+      return s === '' ? null : s
+    }
+
+    // Helper: normalise delivery time to "am" | "pm" | null
+    // Handles: "AM", "PM", "3/23/2026 7:30:00 AM", "morning", "afternoon", etc.
+    const parseDeliveryTime = (v: unknown): string | null => {
+      const s = String(v ?? '').toLowerCase().trim()
+      if (!s) return null
+      if (s.includes('pm') || s.includes('afternoon')) return 'pm'
+      if (s.includes('am') || s.includes('morning')) return 'am'
+      return null
+    }
+
     // Prepare orders
     const ordersInput = rows.map((r) => ({
       id: '',
-      reference: r.reference ?? null,
-      customer: r.customer ?? 'Unknown',
-      postcode: (r.postcode ?? '').toUpperCase().trim(),
-      address: r.address ?? null,
+      reference: str(r.reference),
+      customer: str(r.customer) ?? 'Unknown',
+      postcode: (r.postcode ?? '').toString().toUpperCase().trim(),
+      address: str(r.address),
       weight: parseFloat(String(r.weight ?? '0')) || 0,
-      notes: r.notes ?? null,
-      area: r.area ?? null,
+      notes: str(r.notes),
+      area: str(r.area),
       lat: null as number | null,
       lng: null as number | null,
       status: 'pending',
       scheduledDay: null as string | null,
-      deliveryTime: r.deliveryTime ?? null,
+      deliveryTime: parseDeliveryTime(r.deliveryTime),
       priority: 0,
       importBatch: batchId,
     }))
