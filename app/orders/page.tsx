@@ -112,25 +112,34 @@ export default function OrdersPage() {
         rows = XLSX.utils.sheet_to_json<Record<string, string>>(ws)
       }
 
-      // Normalise column names (case insensitive)
+      // Normalise column names (case insensitive, strips report suffixes like "(MAX)", "(SUM)")
       const normalised = rows.map((row) => {
+        // Strip parenthetical suffixes added by reporting tools e.g. "Order Weight (SUM)" → "order weight"
+        const stripSuffix = (s: string) => s.replace(/\s*\([^)]+\)\s*$/, '').trim().toLowerCase()
         const get = (...keys: string[]) => {
           for (const k of keys) {
-            const found = Object.keys(row).find((r) => r.toLowerCase() === k.toLowerCase())
+            const found = Object.keys(row).find((r) => stripSuffix(r) === k.toLowerCase())
             if (found) return row[found]
           }
           return ''
         }
         return {
-          customer: get('customer', 'company', 'name', 'customer name'),
-          postcode: get('postcode', 'post code', 'zip', 'postal code'),
-          weight: get('weight', 'weight (kg)', 'weight(kg)', 'kg', 'weight kg'),
-          reference: get('reference', 'ref', 'order ref', 'order number', 'job number', 'po'),
-          address: get('address', 'delivery address', 'addr'),
+          // BKG_DESCRIPTION = customer name
+          customer: get('bkg_description', 'customer', 'company', 'name', 'customer name'),
+          // BGK_USER_CHAR3 = postcode (note: BGK not BKG — typo in their system)
+          postcode: get('bgk_user_char3', 'bkg_user_char3', 'postcode', 'post code', 'zip', 'postal code'),
+          // Order Weight = weight in kg
+          weight: get('order weight', 'weight', 'weight (kg)', 'weight(kg)', 'kg', 'weight kg'),
+          // BGK_USER_CHAR1 = reference/job number
+          reference: get('bgk_user_char1', 'bkg_user_char1', 'reference', 'ref', 'order ref', 'order number', 'job number', 'po'),
+          // BGK_USER_NOTES1 = full delivery address
+          address: get('bgk_user_notes1', 'bkg_user_notes1', 'address', 'delivery address', 'addr'),
           notes: get('notes', 'note', 'comments', 'comment'),
           area: get('area', 'region', 'zone', 'area location'),
-          deliveryTime: get('delivery time', 'deliverytime', 'time', 'am/pm', 'window', 'slot'),
-          depot: get('depot', 'despatch office', 'despatch', 'office', 'dispatch office', 'dispatch'),
+          // BKG_START = delivery time (Excel datetime, parsed to am/pm on server)
+          deliveryTime: get('bkg_start', 'delivery time', 'deliverytime', 'time', 'am/pm', 'window', 'slot'),
+          // Despatch Office = depot
+          depot: get('despatch office', 'bkg_despatch', 'depot', 'despatch', 'office', 'dispatch office', 'dispatch'),
         }
       }).filter((r) => r.customer || r.postcode)
 
