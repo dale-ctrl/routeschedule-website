@@ -45,7 +45,8 @@ export default function RoutesPage() {
   const [generateModal, setGenerateModal] = useState(false)
   const [generating, setGenerating] = useState(false)
   const [generateResult, setGenerateResult] = useState<string | null>(null)
-  const [genForm, setGenForm] = useState({ day: 'monday', date: format(new Date(), 'yyyy-MM-dd') })
+  const [genForm, setGenForm] = useState({ day: 'monday', date: format(new Date(), 'yyyy-MM-dd'), includeUnassigned: false })
+  const [preview, setPreview] = useState<{ dayCount: number; unassignedCount: number } | null>(null)
 
   const fetchRoutes = useCallback(() => {
     setLoading(true)
@@ -57,6 +58,14 @@ export default function RoutesPage() {
     fetch('/api/trucks').then((r) => r.json()).then(setTrucks)
   }, [fetchRoutes])
 
+  const fetchPreview = useCallback((day: string) => {
+    setPreview(null)
+    fetch(`/api/routes/preview?day=${day}`)
+      .then((r) => r.json())
+      .then(setPreview)
+      .catch(() => {})
+  }, [])
+
   const handleGenerate = async () => {
     setGenerating(true)
     setGenerateResult(null)
@@ -64,12 +73,13 @@ export default function RoutesPage() {
       const res = await fetch('/api/routes/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ day: genForm.day, date: genForm.date }),
+        body: JSON.stringify({ day: genForm.day, date: genForm.date, includeUnassigned: genForm.includeUnassigned }),
       })
       const data = await res.json()
       if (res.ok) {
-        setGenerateResult(`Generated ${data.total} route(s) successfully.`)
+        setGenerateResult(`Generated ${data.total} route(s) with ${data.ordersRouted} orders.`)
         fetchRoutes()
+        setPreview(null)
       } else {
         setGenerateResult('Error: ' + (data.error ?? 'Unknown error'))
       }
@@ -92,7 +102,7 @@ export default function RoutesPage() {
         title="Routes"
         subtitle={`${routes.length} route(s)`}
         actions={
-          <Button size="sm" onClick={() => setGenerateModal(true)}>
+          <Button size="sm" onClick={() => { setGenerateModal(true); fetchPreview(genForm.day) }}>
             <Zap size={14} /> Generate Routes
           </Button>
         }
@@ -157,16 +167,15 @@ export default function RoutesPage() {
       </div>
 
       {/* Generate Routes Modal */}
-      <Modal open={generateModal} onClose={() => { setGenerateModal(false); setGenerateResult(null) }} title="Generate Routes" size="md">
+      <Modal open={generateModal} onClose={() => { setGenerateModal(false); setGenerateResult(null); setPreview(null) }} title="Generate Routes" size="md">
         <div className="space-y-4">
-          <div className="bg-sky-50 rounded-lg p-4 text-sm text-sky-700">
-            This will assign pending orders scheduled for the selected day to available trucks,
-            optimise stop order, and calculate route times via Google Maps.
-          </div>
           <Select
             label="Day"
             value={genForm.day}
-            onChange={(e) => setGenForm({ ...genForm, day: e.target.value })}
+            onChange={(e) => {
+              setGenForm({ ...genForm, day: e.target.value })
+              fetchPreview(e.target.value)
+            }}
             options={DAYS}
           />
           <Input
@@ -175,19 +184,50 @@ export default function RoutesPage() {
             value={genForm.date}
             onChange={(e) => setGenForm({ ...genForm, date: e.target.value })}
           />
-          <div className="bg-yellow-50 rounded-lg p-3 text-xs text-yellow-700">
-            <strong>Note:</strong> Only orders that have been geocoded (have lat/lng coordinates) will be included.
-            If orders are missing, run Geocode from the Orders page first.
-          </div>
-          {generating && <div className="text-sm text-sky-600 text-center">Generating routes... please wait.</div>}
+
+          {/* Preview counts */}
+          {preview && (
+            <div className="bg-gray-50 rounded-lg p-3 text-sm space-y-1">
+              <div className="flex justify-between">
+                <span className="text-gray-600">Orders assigned to {genForm.day}:</span>
+                <span className={`font-semibold ${preview.dayCount > 0 ? 'text-green-600' : 'text-gray-400'}`}>{preview.dayCount}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-gray-600">Orders with no day assigned:</span>
+                <span className={`font-semibold ${preview.unassignedCount > 0 ? 'text-orange-500' : 'text-gray-400'}`}>{preview.unassignedCount}</span>
+              </div>
+              <div className="flex justify-between border-t border-gray-200 pt-1 mt-1">
+                <span className="text-gray-700 font-medium">Will be routed:</span>
+                <span className="font-bold text-gray-900">
+                  {genForm.includeUnassigned ? preview.dayCount + preview.unassignedCount : preview.dayCount}
+                </span>
+              </div>
+            </div>
+          )}
+
+          {/* Include unassigned toggle */}
+          <label className="flex items-start gap-3 cursor-pointer bg-orange-50 rounded-lg p-3">
+            <input
+              type="checkbox"
+              checked={genForm.includeUnassigned}
+              onChange={(e) => setGenForm({ ...genForm, includeUnassigned: e.target.checked })}
+              className="mt-0.5 w-4 h-4 text-orange-500 rounded"
+            />
+            <div>
+              <p className="text-sm font-medium text-gray-800">Include unassigned orders</p>
+              <p className="text-xs text-gray-500 mt-0.5">Route orders that haven&apos;t been assigned a day by rules. Useful if most orders have no day set.</p>
+            </div>
+          </label>
+
+          {generating && <div className="text-sm text-sky-600 text-center">Generating routes... this may take a moment.</div>}
           {generateResult && (
             <div className={`rounded-lg p-3 text-sm ${generateResult.startsWith('Error') ? 'bg-red-50 text-red-700' : 'bg-green-50 text-green-700'}`}>
               {generateResult}
             </div>
           )}
           <div className="flex gap-2">
-            <Button onClick={handleGenerate} loading={generating}>Generate</Button>
-            <Button variant="secondary" onClick={() => setGenerateModal(false)}>Cancel</Button>
+            <Button onClick={handleGenerate} loading={generating}>Generate Routes</Button>
+            <Button variant="secondary" onClick={() => { setGenerateModal(false); setPreview(null) }}>Cancel</Button>
           </div>
         </div>
       </Modal>
