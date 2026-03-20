@@ -15,6 +15,7 @@ export async function POST(request: Request) {
         notes?: string
         area?: string
         deliveryTime?: string
+        depot?: string
       }[]
     }
 
@@ -61,6 +62,7 @@ export async function POST(request: Request) {
       deliveryTime: parseDeliveryTime(r.deliveryTime),
       priority: 0,
       importBatch: batchId,
+      depot: str(r.depot) ?? null,
     }))
 
     // Apply rules
@@ -98,6 +100,7 @@ export async function POST(request: Request) {
             deliveryTime: o.deliveryTime,
             priority: o.priority,
             importBatch: batchId,
+            depot: o.depot,
           },
         })
         results.push(order)

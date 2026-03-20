@@ -6,11 +6,12 @@ import { parseRule, getRouteWeightLimit } from '@/lib/rules-engine'
 export async function POST(request: Request) {
   try {
     const body = await request.json()
-    const { day, date, truckIds, includeUnassigned } = body as {
+    const { day, date, truckIds, includeUnassigned, depot } = body as {
       day: string
       date: string
       truckIds?: string[]
       includeUnassigned?: boolean
+      depot?: string
     }
 
     if (!day || !date) {
@@ -23,12 +24,22 @@ export async function POST(request: Request) {
     })
 
     const orders = allPending.filter((o) => {
+      if (depot && o.depot !== depot) return false
       if (!o.scheduledDay) {
         // Include orders with no day assigned if the option is checked
         return includeUnassigned === true
       }
       return o.scheduledDay.split(',').map((d) => d.trim()).includes(day)
     })
+
+    // Look up depot coordinates
+    let depotLocation = { lat: 51.5, lng: -1.8 } // fallback
+    if (depot) {
+      const depotRecord = await prisma.depot.findUnique({ where: { name: depot } })
+      if (depotRecord?.lat && depotRecord?.lng) {
+        depotLocation = { lat: depotRecord.lat, lng: depotRecord.lng }
+      }
+    }
 
     if (orders.length === 0) {
       return Response.json(
@@ -92,14 +103,11 @@ export async function POST(request: Request) {
 
     for (const assignment of assignments) {
       const truck = trucks.find((t) => t.id === assignment.truckId)!
-      const orderedStops = optimizeStopOrder(assignment.stops)
-
-      const centLat = orderedStops.reduce((s, st) => s + st.lat, 0) / orderedStops.length
-      const centLng = orderedStops.reduce((s, st) => s + st.lng, 0) / orderedStops.length
+      const orderedStops = optimizeStopOrder(assignment.stops, depotLocation)
 
       let routeDetails = null
       if (orderedStops.length > 0) {
-        const origin = { lat: centLat, lng: centLng }
+        const origin = depotLocation
         const destination = orderedStops[orderedStops.length - 1]
         const waypoints = orderedStops.slice(0, -1)
         routeDetails = await getRouteDetails(origin, destination, waypoints)
@@ -116,6 +124,7 @@ export async function POST(request: Request) {
           totalWeight: assignment.totalWeight,
           totalDistance: routeDetails?.totalDistance ?? null,
           totalDuration: routeDetails?.totalDuration ?? null,
+          depot: depot ?? null,
         },
       })
 

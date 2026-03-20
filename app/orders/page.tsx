@@ -26,7 +26,13 @@ interface Order {
   lat: number | null
   lng: number | null
   priority: number
+  depot: string | null
   createdAt: string
+}
+
+interface Depot {
+  id: string
+  name: string
 }
 
 const DAYS = [
@@ -55,6 +61,8 @@ export default function OrdersPage() {
   const [search, setSearch] = useState('')
   const [statusFilter, setStatusFilter] = useState('')
   const [dayFilter, setDayFilter] = useState('')
+  const [depotFilter, setDepotFilter] = useState('')
+  const [depots, setDepots] = useState<Depot[]>([])
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [importModal, setImportModal] = useState(false)
   const [editOrder, setEditOrder] = useState<Order | null>(null)
@@ -65,6 +73,10 @@ export default function OrdersPage() {
 
   const LIMIT = 50
 
+  useEffect(() => {
+    fetch('/api/depots').then((r) => r.json()).then(setDepots).catch(() => {})
+  }, [])
+
   const fetchOrders = useCallback(() => {
     setLoading(true)
     const params = new URLSearchParams({
@@ -73,12 +85,13 @@ export default function OrdersPage() {
       ...(search ? { search } : {}),
       ...(statusFilter ? { status: statusFilter } : {}),
       ...(dayFilter ? { day: dayFilter } : {}),
+      ...(depotFilter ? { depot: depotFilter } : {}),
     })
     fetch(`/api/orders?${params}`)
       .then((r) => r.json())
       .then((d) => { setOrders(d.orders); setTotal(d.total) })
       .finally(() => setLoading(false))
-  }, [page, search, statusFilter, dayFilter])
+  }, [page, search, statusFilter, dayFilter, depotFilter])
 
   useEffect(() => { fetchOrders() }, [fetchOrders])
 
@@ -117,6 +130,7 @@ export default function OrdersPage() {
           notes: get('notes', 'note', 'comments', 'comment'),
           area: get('area', 'region', 'zone', 'area location'),
           deliveryTime: get('delivery time', 'deliverytime', 'time', 'am/pm', 'window', 'slot'),
+          depot: get('depot', 'despatch office', 'despatch', 'office', 'dispatch office', 'dispatch'),
         }
       }).filter((r) => r.customer || r.postcode)
 
@@ -215,6 +229,16 @@ export default function OrdersPage() {
         >
           {DAYS.map((d) => <option key={d.value} value={d.value}>{d.label}</option>)}
         </select>
+        {depots.length > 0 && (
+          <select
+            className="px-3 py-1.5 text-sm border border-gray-300 rounded-lg bg-white focus:outline-none"
+            value={depotFilter}
+            onChange={(e) => { setDepotFilter(e.target.value); setPage(1) }}
+          >
+            <option value="">All depots</option>
+            {depots.map((d) => <option key={d.id} value={d.name}>{d.name}</option>)}
+          </select>
+        )}
       </div>
 
       {/* Table */}

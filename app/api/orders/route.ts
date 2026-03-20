@@ -4,6 +4,7 @@ export async function GET(request: Request) {
   const { searchParams } = new URL(request.url)
   const status = searchParams.get('status')
   const day = searchParams.get('day')
+  const depot = searchParams.get('depot')
   const page = parseInt(searchParams.get('page') ?? '1')
   const limit = parseInt(searchParams.get('limit') ?? '50')
   const search = searchParams.get('search') ?? ''
@@ -11,6 +12,7 @@ export async function GET(request: Request) {
   const where = {
     ...(status ? { status } : {}),
     ...(day ? { scheduledDay: day } : {}),
+    ...(depot ? { depot } : {}),
     ...(search
       ? {
           OR: [

@@ -47,13 +47,20 @@ interface RouteData {
   }[]
 }
 
+interface Depot {
+  id: string
+  name: string
+}
+
 export default function MapPage() {
   const [dates, setDates] = useState<string[]>([])
   const [selectedDate, setSelectedDate] = useState<string>('')
+  const [depots, setDepots] = useState<Depot[]>([])
+  const [selectedDepot, setSelectedDepot] = useState<string>('')
   const [routes, setRoutes] = useState<RouteData[]>([])
   const [loading, setLoading] = useState(false)
 
-  // Load available dates on mount
+  // Load available dates and depots on mount
   useEffect(() => {
     fetch('/api/routes/dates')
       .then((r) => r.json())
@@ -61,20 +68,23 @@ export default function MapPage() {
         setDates(d)
         if (d.length > 0) setSelectedDate(d[0])
       })
+    fetch('/api/depots').then((r) => r.json()).then(setDepots).catch(() => {})
   }, [])
 
-  const fetchRoutes = useCallback((date: string) => {
+  const fetchRoutes = useCallback((date: string, depot: string) => {
     if (!date) return
     setLoading(true)
-    fetch(`/api/routes?date=${date}`)
+    const params = new URLSearchParams({ date })
+    if (depot) params.set('depot', depot)
+    fetch(`/api/routes?${params.toString()}`)
       .then((r) => r.json())
       .then(setRoutes)
       .finally(() => setLoading(false))
   }, [])
 
   useEffect(() => {
-    if (selectedDate) fetchRoutes(selectedDate)
-  }, [selectedDate, fetchRoutes])
+    if (selectedDate) fetchRoutes(selectedDate, selectedDepot)
+  }, [selectedDate, selectedDepot, fetchRoutes])
 
   // Build MapRoute objects with assigned colours
   const mapRoutes: MapRoute[] = routes.map((r, i) => ({
@@ -103,6 +113,18 @@ export default function MapPage() {
         subtitle="All routes for a day on one map"
         actions={
           <div className="flex items-center gap-3">
+            {depots.length > 0 && (
+              <select
+                value={selectedDepot}
+                onChange={(e) => setSelectedDepot(e.target.value)}
+                className="px-3 py-1.5 text-sm border border-gray-300 rounded-lg bg-white text-gray-800 focus:outline-none focus:ring-2 focus:ring-sky-500"
+              >
+                <option value="">All depots</option>
+                {depots.map((d) => (
+                  <option key={d.id} value={d.name}>{d.name}</option>
+                ))}
+              </select>
+            )}
             <select
               value={selectedDate}
               onChange={(e) => setSelectedDate(e.target.value)}

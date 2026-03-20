@@ -4,9 +4,11 @@ export async function GET(request: Request) {
   const { searchParams } = new URL(request.url)
   const status = searchParams.get('status')
   const date = searchParams.get('date')
+  const depot = searchParams.get('depot')
 
   const where = {
     ...(status ? { status } : {}),
+    ...(depot ? { depot } : {}),
     ...(date
       ? {
           date: {
@@ -55,6 +57,7 @@ export async function POST(request: Request) {
       status: body.status ?? 'planned',
       totalWeight: body.totalWeight ?? 0,
       notes: body.notes,
+      depot: body.depot ?? null,
     },
   })
   return Response.json(route, { status: 201 })

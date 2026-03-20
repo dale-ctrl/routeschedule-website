@@ -40,6 +40,7 @@ model Order {
   importBatch  String?
   deliveryTime String?
   priority     Int         @default(0)
+  depot        String?
   createdAt    DateTime    @default(now())
   updatedAt    DateTime    @updatedAt
   routeStops   RouteStop[]
@@ -56,6 +57,7 @@ model Route {
   totalDistance Float?
   totalDuration Int?
   notes         String?
+  depot         String?
   createdAt     DateTime    @default(now())
   updatedAt     DateTime    @updatedAt
   stops         RouteStop[]
@@ -95,5 +97,16 @@ model Setting {
   id        String   @id @default(cuid())
   key       String   @unique
   value     String
+  updatedAt DateTime @updatedAt
+}
+
+model Depot {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  address   String?
+  lat       Float?
+  lng       Float?
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }

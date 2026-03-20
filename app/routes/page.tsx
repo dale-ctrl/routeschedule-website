@@ -29,6 +29,11 @@ interface Truck {
   capacity: number
 }
 
+interface Depot {
+  id: string
+  name: string
+}
+
 const DAYS = [
   { value: 'monday', label: 'Monday' },
   { value: 'tuesday', label: 'Tuesday' },
@@ -41,6 +46,8 @@ const DAYS = [
 export default function RoutesPage() {
   const [routes, setRoutes] = useState<Route[]>([])
   const [trucks, setTrucks] = useState<Truck[]>([])
+  const [depots, setDepots] = useState<Depot[]>([])
+  const [selectedDepot, setSelectedDepot] = useState('')
   const [loading, setLoading] = useState(true)
   const [generateModal, setGenerateModal] = useState(false)
   const [generating, setGenerating] = useState(false)
@@ -48,19 +55,24 @@ export default function RoutesPage() {
   const [genForm, setGenForm] = useState({ day: 'monday', date: format(new Date(), 'yyyy-MM-dd'), includeUnassigned: false })
   const [preview, setPreview] = useState<{ dayCount: number; unassignedCount: number } | null>(null)
 
-  const fetchRoutes = useCallback(() => {
+  const fetchRoutes = useCallback((depot: string) => {
     setLoading(true)
-    fetch('/api/routes').then((r) => r.json()).then(setRoutes).finally(() => setLoading(false))
+    const params = new URLSearchParams()
+    if (depot) params.set('depot', depot)
+    fetch(`/api/routes${params.toString() ? '?' + params.toString() : ''}`).then((r) => r.json()).then(setRoutes).finally(() => setLoading(false))
   }, [])
 
   useEffect(() => {
-    fetchRoutes()
+    fetchRoutes(selectedDepot)
     fetch('/api/trucks').then((r) => r.json()).then(setTrucks)
-  }, [fetchRoutes])
+    fetch('/api/depots').then((r) => r.json()).then(setDepots).catch(() => {})
+  }, [fetchRoutes, selectedDepot])
 
-  const fetchPreview = useCallback((day: string) => {
+  const fetchPreview = useCallback((day: string, depot: string) => {
     setPreview(null)
-    fetch(`/api/routes/preview?day=${day}`)
+    const params = new URLSearchParams({ day })
+    if (depot) params.set('depot', depot)
+    fetch(`/api/routes/preview?${params.toString()}`)
       .then((r) => r.json())
       .then(setPreview)
       .catch(() => {})
@@ -73,12 +85,12 @@ export default function RoutesPage() {
       const res = await fetch('/api/routes/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ day: genForm.day, date: genForm.date, includeUnassigned: genForm.includeUnassigned }),
+        body: JSON.stringify({ day: genForm.day, date: genForm.date, includeUnassigned: genForm.includeUnassigned, ...(selectedDepot ? { depot: selectedDepot } : {}) }),
       })
       const data = await res.json()
       if (res.ok) {
         setGenerateResult(`Generated ${data.total} route(s) with ${data.ordersRouted} orders.`)
-        fetchRoutes()
+        fetchRoutes(selectedDepot)
         setPreview(null)
       } else {
         setGenerateResult('Error: ' + (data.error ?? 'Unknown error'))
@@ -93,7 +105,7 @@ export default function RoutesPage() {
   const handleDelete = async (id: string) => {
     if (!confirm('Delete this route?')) return
     await fetch(`/api/routes/${id}`, { method: 'DELETE' })
-    fetchRoutes()
+    fetchRoutes(selectedDepot)
   }
 
   return (
@@ -102,9 +114,21 @@ export default function RoutesPage() {
         title="Routes"
         subtitle={`${routes.length} route(s)`}
         actions={
-          <Button size="sm" onClick={() => { setGenerateModal(true); fetchPreview(genForm.day) }}>
-            <Zap size={14} /> Generate Routes
-          </Button>
+          <div className="flex items-center gap-3">
+            {depots.length > 0 && (
+              <select
+                className="px-3 py-1.5 text-sm border border-gray-300 rounded-lg bg-white focus:outline-none"
+                value={selectedDepot}
+                onChange={(e) => setSelectedDepot(e.target.value)}
+              >
+                <option value="">All depots</option>
+                {depots.map((d) => <option key={d.id} value={d.name}>{d.name}</option>)}
+              </select>
+            )}
+            <Button size="sm" onClick={() => { setGenerateModal(true); fetchPreview(genForm.day, selectedDepot) }}>
+              <Zap size={14} /> Generate Routes
+            </Button>
+          </div>
         }
       />
 
@@ -174,7 +198,7 @@ export default function RoutesPage() {
             value={genForm.day}
             onChange={(e) => {
               setGenForm({ ...genForm, day: e.target.value })
-              fetchPreview(e.target.value)
+              fetchPreview(e.target.value, selectedDepot)
             }}
             options={DAYS}
           />

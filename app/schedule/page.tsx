@@ -20,6 +20,11 @@ interface Route {
   stops: { id: string }[]
 }
 
+interface Depot {
+  id: string
+  name: string
+}
+
 const DAYS_OF_WEEK = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
 
 export default function SchedulePage() {
@@ -27,14 +32,24 @@ export default function SchedulePage() {
   const [routes, setRoutes] = useState<Route[]>([])
   const [loading, setLoading] = useState(true)
   const [ordersByDay, setOrdersByDay] = useState<Record<string, number>>({})
+  const [depots, setDepots] = useState<Depot[]>([])
+  const [selectedDepot, setSelectedDepot] = useState('')
 
   const weekDays = DAYS_OF_WEEK.map((_, i) => addDays(weekStart, i))
 
   useEffect(() => {
+    fetch('/api/depots').then((r) => r.json()).then(setDepots).catch(() => {})
+  }, [])
+
+  useEffect(() => {
     setLoading(true)
+    const routeParams = new URLSearchParams()
+    if (selectedDepot) routeParams.set('depot', selectedDepot)
+    const orderParams = new URLSearchParams({ limit: '1000' })
+    if (selectedDepot) orderParams.set('depot', selectedDepot)
     Promise.all([
-      fetch('/api/routes').then((r) => r.json()),
-      fetch('/api/orders?limit=1000').then((r) => r.json()),
+      fetch(`/api/routes${routeParams.toString() ? '?' + routeParams.toString() : ''}`).then((r) => r.json()),
+      fetch(`/api/orders?${orderParams.toString()}`).then((r) => r.json()),
     ]).then(([routesData, ordersData]) => {
       setRoutes(routesData)
       // Count pending orders by day
@@ -46,7 +61,7 @@ export default function SchedulePage() {
       }
       setOrdersByDay(byDay)
     }).finally(() => setLoading(false))
-  }, [])
+  }, [selectedDepot])
 
   const getRoutesForDay = (date: Date) => {
     const dateStr = format(date, 'yyyy-MM-dd')
@@ -64,6 +79,16 @@ export default function SchedulePage() {
         subtitle={`Week of ${format(weekStart, 'd MMMM yyyy')}`}
         actions={
           <div className="flex items-center gap-2">
+            {depots.length > 0 && (
+              <select
+                className="px-3 py-1.5 text-sm border border-gray-300 rounded-lg bg-white focus:outline-none"
+                value={selectedDepot}
+                onChange={(e) => setSelectedDepot(e.target.value)}
+              >
+                <option value="">All depots</option>
+                {depots.map((d) => <option key={d.id} value={d.name}>{d.name}</option>)}
+              </select>
+            )}
             <Button variant="secondary" size="sm" onClick={() => setWeekStart(subWeeks(weekStart, 1))}>
               <ChevronLeft size={14} />
             </Button>

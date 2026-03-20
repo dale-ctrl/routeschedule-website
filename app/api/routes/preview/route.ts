@@ -3,16 +3,18 @@ import { prisma } from '@/lib/prisma'
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url)
   const day = searchParams.get('day') ?? ''
+  const depot = searchParams.get('depot') ?? ''
 
   const allPending = await prisma.order.findMany({
     where: { status: 'pending', lat: { not: null }, lng: { not: null } },
-    select: { id: true, scheduledDay: true },
+    select: { id: true, scheduledDay: true, depot: true },
   })
 
   let dayCount = 0
   let unassignedCount = 0
 
   for (const o of allPending) {
+    if (depot && o.depot !== depot) continue
     if (!o.scheduledDay) {
       unassignedCount++
     } else if (o.scheduledDay.split(',').map((d) => d.trim()).includes(day)) {
