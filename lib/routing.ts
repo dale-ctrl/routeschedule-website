@@ -5,20 +5,36 @@ export interface GeoResult {
   formatted: string
 }
 
-/** Geocode a single UK postcode using postcodes.io (free, no API key required) */
+/** Geocode a single UK postcode using postcodes.io, with terminated postcode fallback */
 export async function geocodePostcode(postcode: string): Promise<GeoResult | null> {
-  const cleaned = postcode.trim().toUpperCase().replace(/\s+/g, '')
+  const cleaned = postcode.trim().toUpperCase().replace(/[^A-Z0-9]/g, '')
   try {
     const res = await fetch(`https://api.postcodes.io/postcodes/${encodeURIComponent(cleaned)}`)
-    if (!res.ok) return null
-    const data = await res.json()
-    if (data.status !== 200 || !data.result) return null
-    return {
-      postcode,
-      lat: data.result.latitude,
-      lng: data.result.longitude,
-      formatted: data.result.postcode,
+    if (res.ok) {
+      const data = await res.json()
+      if (data.status === 200 && data.result) {
+        return {
+          postcode,
+          lat: data.result.latitude,
+          lng: data.result.longitude,
+          formatted: data.result.postcode,
+        }
+      }
     }
+    // Fallback: terminated postcodes (retired but still have valid coordinates)
+    const terminated = await fetch(`https://api.postcodes.io/terminated_postcodes/${encodeURIComponent(cleaned)}`)
+    if (terminated.ok) {
+      const data = await terminated.json()
+      if (data.status === 200 && data.result) {
+        return {
+          postcode,
+          lat: data.result.latitude,
+          lng: data.result.longitude,
+          formatted: postcode.toUpperCase(),
+        }
+      }
+    }
+    return null
   } catch (err) {
     console.error('Geocode error for', postcode, err)
     return null
@@ -97,10 +113,24 @@ export async function geocodePostcodesBulk(
       const res = await fetch(
         `https://api.postcodes.io/postcodes/${encodeURIComponent(pc)}`
       )
-      if (!res.ok) continue
-      const data = await res.json()
-      if (data.status === 200 && data.result) {
-        store(pc, data.result.latitude, data.result.longitude)
+      if (res.ok) {
+        const data = await res.json()
+        if (data.status === 200 && data.result) {
+          store(pc, data.result.latitude, data.result.longitude)
+          continue
+        }
+      }
+
+      // Last resort: check terminated postcodes (postcodes retired since 1990s
+      // that are no longer active but still have valid coordinates)
+      const terminated = await fetch(
+        `https://api.postcodes.io/terminated_postcodes/${encodeURIComponent(pc)}`
+      )
+      if (terminated.ok) {
+        const data = await terminated.json()
+        if (data.status === 200 && data.result) {
+          store(pc, data.result.latitude, data.result.longitude)
+        }
       }
     } catch {
       // silently skip genuinely invalid postcodes
