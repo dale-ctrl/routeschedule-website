@@ -17,11 +17,12 @@ export async function PUT(req: Request, { params }: { params: Promise<{ id: stri
     where: { id },
     data: {
       name: body.name,
-      registration: body.registration,
+      registration: body.registration ?? null,
       capacity: parseFloat(body.capacity) || 7500,
       type: body.type,
       active: body.active,
-      notes: body.notes,
+      depot: body.depot ?? null,
+      notes: body.notes ?? null,
     },
   })
   return Response.json(truck)

@@ -17,6 +17,7 @@ model Truck {
   capacity     Float       @default(7500)
   type         String      @default("12T DAF")
   active       Boolean     @default(true)
+  depot        String?
   notes        String?
   createdAt    DateTime    @default(now())
   updatedAt    DateTime    @updatedAt

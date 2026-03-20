@@ -15,8 +15,14 @@ interface TruckRecord {
   capacity: number
   type: string
   active: boolean
+  depot: string | null
   notes: string | null
   createdAt: string
+}
+
+interface Depot {
+  id: string
+  name: string
 }
 
 const emptyTruck = {
@@ -25,6 +31,7 @@ const emptyTruck = {
   capacity: '7500',
   type: '12T DAF',
   active: true,
+  depot: '',
   notes: '',
 }
 
@@ -38,6 +45,7 @@ const TRUCK_TYPES = [
 
 export default function TrucksPage() {
   const [trucks, setTrucks] = useState<TruckRecord[]>([])
+  const [depots, setDepots] = useState<Depot[]>([])
   const [loading, setLoading] = useState(true)
   const [modal, setModal] = useState(false)
   const [editingTruck, setEditingTruck] = useState<typeof emptyTruck | null>(null)
@@ -49,7 +57,10 @@ export default function TrucksPage() {
     fetch('/api/trucks').then((r) => r.json()).then(setTrucks).finally(() => setLoading(false))
   }, [])
 
-  useEffect(() => { fetchTrucks() }, [fetchTrucks])
+  useEffect(() => {
+    fetchTrucks()
+    fetch('/api/depots').then((r) => r.json()).then(setDepots).catch(() => {})
+  }, [fetchTrucks])
 
   const openNew = () => {
     setEditingTruck({ ...emptyTruck })
@@ -64,6 +75,7 @@ export default function TrucksPage() {
       capacity: String(truck.capacity),
       type: truck.type,
       active: truck.active,
+      depot: truck.depot ?? '',
       notes: truck.notes ?? '',
     })
     setEditingId(truck.id)
@@ -138,6 +150,14 @@ export default function TrucksPage() {
                   </div>
                 </div>
 
+                {truck.depot && (
+                  <div className="mb-3">
+                    <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-sky-100 text-sky-700">
+                      {truck.depot}
+                    </span>
+                  </div>
+                )}
+
                 <div className="grid grid-cols-2 gap-3 text-sm">
                   <div>
                     <div className="text-xs text-gray-400">Type</div>
@@ -176,10 +196,21 @@ export default function TrucksPage() {
       <Modal open={modal} onClose={() => setModal(false)} title={editingId ? 'Edit Truck' : 'Add Truck'}>
         {editingTruck && (
           <div className="space-y-4">
-            <Input label="Truck Name" value={editingTruck.name} onChange={(e) => setEditingTruck({ ...editingTruck, name: e.target.value })} placeholder="e.g. DAF 1 - North" />
+            <Input label="Truck Name" value={editingTruck.name} onChange={(e) => setEditingTruck({ ...editingTruck, name: e.target.value })} placeholder="e.g. DAF 1 - Plymouth" />
             <Input label="Registration" value={editingTruck.registration} onChange={(e) => setEditingTruck({ ...editingTruck, registration: e.target.value })} placeholder="e.g. AB12 CDE" />
             <Select label="Truck Type" value={editingTruck.type} onChange={(e) => setEditingTruck({ ...editingTruck, type: e.target.value })} options={TRUCK_TYPES} />
             <Input label="Payload Capacity (kg)" type="number" value={editingTruck.capacity} onChange={(e) => setEditingTruck({ ...editingTruck, capacity: e.target.value })} />
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Depot</label>
+              <select
+                className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-sky-500"
+                value={editingTruck.depot}
+                onChange={(e) => setEditingTruck({ ...editingTruck, depot: e.target.value })}
+              >
+                <option value="">No depot assigned</option>
+                {depots.map((d) => <option key={d.id} value={d.name}>{d.name}</option>)}
+              </select>
+            </div>
             <TextArea label="Notes (optional)" value={editingTruck.notes} onChange={(e) => setEditingTruck({ ...editingTruck, notes: e.target.value })} placeholder="Any notes about this truck..." />
             <label className="flex items-center gap-2 cursor-pointer">
               <input type="checkbox" checked={editingTruck.active} onChange={(e) => setEditingTruck({ ...editingTruck, active: e.target.checked })} className="w-4 h-4 text-sky-600 rounded" />

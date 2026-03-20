@@ -52,16 +52,23 @@ export async function POST(request: Request) {
       )
     }
 
-    // Get trucks
+    // Get trucks — filter by depot if one is selected, otherwise only use trucks with no depot assigned
     const trucks = await prisma.truck.findMany({
       where: {
         active: true,
-        ...(truckIds && truckIds.length > 0 ? { id: { in: truckIds } } : {}),
+        ...(truckIds && truckIds.length > 0
+          ? { id: { in: truckIds } }
+          : depot
+          ? { depot }
+          : {}),
       },
     })
 
     if (trucks.length === 0) {
-      return Response.json({ error: 'No active trucks available' }, { status: 400 })
+      return Response.json(
+        { error: depot ? `No active trucks assigned to the ${depot} depot.` : 'No active trucks available.' },
+        { status: 400 }
+      )
     }
 
     // Evaluate route-level weight limit rules
