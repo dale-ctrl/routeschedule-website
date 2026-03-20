@@ -13,7 +13,24 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
 export async function PUT(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params
   const body = await req.json()
-  const order = await prisma.order.update({ where: { id }, data: body })
+  const order = await prisma.order.update({
+    where: { id },
+    data: {
+      customer: body.customer,
+      reference: body.reference ?? null,
+      postcode: body.postcode,
+      address: body.address ?? null,
+      weight: body.weight,
+      notes: body.notes ?? null,
+      area: body.area ?? null,
+      status: body.status,
+      scheduledDay: body.scheduledDay ?? null,
+      deliveryTime: body.deliveryTime ?? null,
+      priority: body.priority ?? 0,
+      depot: body.depot ?? null,
+      preferredTruckType: body.preferredTruckType ?? null,
+    },
+  })
   return Response.json(order)
 }
 

@@ -5,13 +5,14 @@ import { PageHeader } from '@/components/ui/PageHeader'
 import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
 import { Modal } from '@/components/ui/Modal'
-import { Save, MapPin, CheckCircle, Plus, Pencil, Trash2 } from 'lucide-react'
+import { Save, MapPin, CheckCircle, Plus, Pencil, Trash2, Sparkles } from 'lucide-react'
 
 interface Settings {
   DEPOT_LAT?: string
   DEPOT_LNG?: string
   DEPOT_ADDRESS?: string
   DEFAULT_TRUCK_CAPACITY?: string
+  GROQ_API_KEY?: string
 }
 
 interface Depot {
@@ -145,6 +146,27 @@ export default function SettingsPage() {
                   <li><strong>Maps</strong> — Leaflet + OpenStreetMap (free, used by Wikipedia &amp; GitHub)</li>
                 </ul>
               </div>
+            </div>
+          </section>
+
+          {/* AI Integration */}
+          <section className="bg-white rounded-xl border border-gray-200 p-6">
+            <div className="flex items-center gap-2 mb-4">
+              <Sparkles size={18} className="text-purple-500" />
+              <h2 className="font-semibold text-gray-900">AI Integration</h2>
+            </div>
+            <div className="space-y-3">
+              <Input
+                label="Groq API Key"
+                type="password"
+                value={settings.GROQ_API_KEY ?? ''}
+                onChange={(e) => setSettings({ ...settings, GROQ_API_KEY: e.target.value })}
+                placeholder="gsk_..."
+              />
+              <p className="text-xs text-gray-400">
+                Required for AI-powered rule creation (plain-English → structured rule). Free at console.groq.com — no billing needed.
+                Leave blank if you don&apos;t use the AI rule feature.
+              </p>
             </div>
           </section>
 

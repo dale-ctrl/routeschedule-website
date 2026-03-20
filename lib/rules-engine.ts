@@ -1,11 +1,11 @@
 export interface Condition {
-  field: 'postcode' | 'area' | 'weight' | 'customer' | 'notes' | 'reference' | 'deliveryTime'
+  field: 'postcode' | 'area' | 'weight' | 'customer' | 'notes' | 'reference' | 'deliveryTime' | 'depot'
   operator: 'eq' | 'ne' | 'contains' | 'starts_with' | 'ends_with' | 'gte' | 'lte' | 'in'
   value: string | number | string[]
 }
 
 export interface Action {
-  type: 'assign_day' | 'assign_days' | 'assign_truck' | 'set_priority' | 'block' | 'set_delivery_time' | 'set_area' | 'set_run_weight_limit'
+  type: 'assign_day' | 'assign_days' | 'assign_truck' | 'set_priority' | 'block' | 'set_delivery_time' | 'set_area' | 'set_run_weight_limit' | 'set_min_truck_load' | 'assign_truck_type'
   value: string | number
 }
 
@@ -31,6 +31,8 @@ export interface OrderForRules {
   deliveryTime?: string | null
   scheduledDay?: string | null
   priority: number
+  depot?: string | null
+  preferredTruckType?: string | null
 }
 
 function evaluateCondition(order: OrderForRules, condition: Condition): boolean {
@@ -108,6 +110,11 @@ export function applyRules(
           case 'set_area':
             updated.area = String(action.value)
             break
+          case 'assign_truck_type':
+            if (!updated.preferredTruckType) {
+              updated.preferredTruckType = String(action.value)
+            }
+            break
           case 'block':
             updated.scheduledDay = 'blocked'
             break
@@ -180,4 +187,42 @@ export function getRouteWeightLimit(
   }
 
   return minLimit
+}
+
+/**
+ * Evaluate all active truck consolidation rules.
+ * Returns the highest (strictest) min-load percentage found, or null if no rules apply.
+ * e.g. 70 means "don't dispatch a second truck unless the first would be at least 70% full".
+ * The route optimizer uses this to cap the number of trucks to the minimum needed.
+ */
+export function getMinTruckLoadPct(
+  rules: ParsedRule[],
+  orders: OrderForRules[]
+): number | null {
+  const consolidationRules = rules.filter(
+    (r) => r.active && r.actions.some((a) => a.type === 'set_min_truck_load')
+  )
+
+  if (consolidationRules.length === 0) return null
+
+  let maxPct: number | null = null
+
+  for (const rule of consolidationRules) {
+    const applies =
+      rule.conditions.length === 0 ||
+      orders.some((o) => conditionsMatch(o, rule.conditions, rule.conditionLogic))
+
+    if (!applies) continue
+
+    for (const action of rule.actions) {
+      if (action.type === 'set_min_truck_load') {
+        const pct = Number(action.value)
+        if (!isNaN(pct) && (maxPct === null || pct > maxPct)) {
+          maxPct = pct
+        }
+      }
+    }
+  }
+
+  return maxPct
 }

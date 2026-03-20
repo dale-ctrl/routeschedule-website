@@ -140,6 +140,51 @@ export async function geocodePostcodesBulk(
   return result
 }
 
+/**
+ * Use OSRM's Trip service to find the optimal stop visiting order using real road distances.
+ * The depot is fixed as the starting point (source=first).
+ * Falls back to the provided fallback function if OSRM is unavailable.
+ */
+export async function osrmTripOptimize<T extends { lat: number; lng: number }>(
+  depot: { lat: number; lng: number },
+  stops: T[],
+  fallback: (stops: T[], depot: { lat: number; lng: number }) => T[]
+): Promise<T[]> {
+  if (stops.length <= 1) return stops
+
+  try {
+    const allPoints = [depot, ...stops]
+    const coords = allPoints.map((p) => `${p.lng},${p.lat}`).join(';')
+    const url = `https://router.project-osrm.org/trip/v1/driving/${coords}?source=first&roundtrip=false&geometries=false&overview=false`
+
+    const res = await fetch(url)
+    if (!res.ok) throw new Error(`OSRM trip HTTP ${res.status}`)
+    const data = await res.json()
+
+    if (data.code !== 'Ok' || !data.waypoints || data.waypoints.length !== allPoints.length) {
+      throw new Error(`OSRM trip failed: ${data.code}`)
+    }
+
+    // data.waypoints[i].waypoint_index = position of input point i in the optimal trip.
+    // Depot is input index 0 and is fixed at waypoint_index 0.
+    // Reconstruct the ordered stop array from these indices.
+    const ordered = new Array<T>(stops.length)
+    data.waypoints.forEach((wp: { waypoint_index: number }, inputIndex: number) => {
+      if (inputIndex === 0) return // skip depot
+      const routePosition = wp.waypoint_index - 1 // subtract 1 because depot occupies position 0
+      ordered[routePosition] = stops[inputIndex - 1]
+    })
+
+    const result = ordered.filter(Boolean) as T[]
+    if (result.length !== stops.length) throw new Error('OSRM trip returned incomplete waypoints')
+
+    return result
+  } catch (err) {
+    console.warn('[OSRM trip] Falling back to local optimiser:', String(err))
+    return fallback(stops, depot)
+  }
+}
+
 export interface RouteResult {
   totalDuration: number // minutes
   totalDistance: number // km

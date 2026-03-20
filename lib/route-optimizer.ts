@@ -10,6 +10,7 @@ export interface Stop {
   address?: string | null
   deliveryTime?: string | null
   priority: number
+  preferredTruckType?: string | null
 }
 
 export interface TruckAssignment {
@@ -97,12 +98,22 @@ function geographicCluster(stops: Stop[], k: number): Stop[][] {
  */
 export function assignToTrucks(
   stops: Stop[],
-  trucks: { id: string; name: string; capacity: number }[]
+  trucks: { id: string; name: string; capacity: number; type?: string | null }[],
+  minLoadPct: number | null = null
 ): TruckAssignment[] {
   const activeTrucks = trucks.filter((t) => t.capacity > 0)
   if (activeTrucks.length === 0 || stops.length === 0) return []
 
-  const k = activeTrucks.length
+  // Truck consolidation: if a min-load rule applies, use the fewest trucks that
+  // would keep each truck above the threshold — avoids sending half-empty trucks.
+  let k = activeTrucks.length
+  if (minLoadPct !== null && minLoadPct > 0) {
+    const totalWeight = stops.reduce((s, st) => s + st.weight, 0)
+    const maxCapacity = Math.max(...activeTrucks.map((t) => t.capacity))
+    const effectiveCapacity = maxCapacity * (minLoadPct / 100)
+    const minTrucks = Math.ceil(totalWeight / effectiveCapacity)
+    k = Math.max(1, Math.min(activeTrucks.length, minTrucks))
+  }
   const clusters = geographicCluster(stops, k)
 
   // Match heaviest cluster to highest-capacity truck
@@ -119,11 +130,43 @@ export function assignToTrucks(
     totalWeight: 0,
   }))
 
-  clustersSorted.forEach((cluster, i) => {
+  // Pre-assign stops that have a preferred truck type to a matching truck.
+  // Highest-priority (most specific) rule wins because applyRules only sets preferredTruckType
+  // if not already set, so the highest-priority matching rule sticks.
+  const forcedStopIds = new Set<string>()
+  for (const stop of stops) {
+    if (!stop.preferredTruckType) continue
+    const pref = stop.preferredTruckType.toLowerCase()
+    // Find matching trucks (type contains the preference string, case-insensitive)
+    const matching = activeTrucks.filter(
+      (t) => t.type && t.type.toLowerCase().includes(pref)
+    )
+    if (matching.length === 0) continue // no match — falls through to normal clustering
+    // Assign to the least-loaded matching truck that has remaining capacity
+    const target = matching
+      .map((t) => assignments.find((a) => a.truckId === t.id)!)
+      .sort((a, b) => a.totalWeight - b.totalWeight)
+      .find((a) => a.totalWeight + stop.weight <= a.capacity)
+      ?? assignments.find((a) => a.truckId === matching[0].id)! // fallback: first matching truck
+    target.stops.push(stop)
+    target.totalWeight += stop.weight
+    forcedStopIds.add(stop.id)
+  }
+
+  // Remove forced stops from the clusters so they aren't double-assigned
+  const remainingStops = stops.filter((s) => !forcedStopIds.has(s.id))
+
+  // Re-cluster only the remaining (unforced) stops
+  const remainingClusters = geographicCluster(remainingStops, Math.min(k, remainingStops.length || 1))
+  const remainingClustersSorted = [...remainingClusters].sort(
+    (a, b) => b.reduce((s, st) => s + st.weight, 0) - a.reduce((s, st) => s + st.weight, 0)
+  )
+
+  remainingClustersSorted.forEach((cluster, i) => {
     if (i >= trucksSorted.length) return
     const a = assignments.find((x) => x.truckId === trucksSorted[i].id)!
-    a.stops = [...cluster]
-    a.totalWeight = cluster.reduce((s, st) => s + st.weight, 0)
+    a.stops = [...a.stops, ...cluster]
+    a.totalWeight += cluster.reduce((s, st) => s + st.weight, 0)
   })
 
   // Rebalance: move stops from over-capacity trucks to the nearest under-capacity truck
@@ -183,30 +226,75 @@ export function assignToTrucks(
   return assignments.filter((a) => a.stops.length > 0)
 }
 
-/** Nearest-neighbor TSP: order stops to minimise total driving distance */
+/**
+ * Local fallback stop-order optimiser (no external calls).
+ * ≤ 10 stops: brute-force all permutations — guaranteed globally optimal.
+ * > 10 stops: nearest-neighbour + 2-opt — good approximation.
+ */
 export function optimizeStopOrder(
   stops: Stop[],
   depot = { lat: 51.5, lng: -1.8 }
 ): Stop[] {
   if (stops.length <= 1) return stops
 
+  const dist = (a: { lat: number; lng: number }, b: { lat: number; lng: number }) =>
+    haversineDistance(a.lat, a.lng, b.lat, b.lng)
+
+  const routeDist = (r: Stop[]) => {
+    let d = dist(depot, r[0])
+    for (let i = 0; i < r.length - 1; i++) d += dist(r[i], r[i + 1])
+    return d
+  }
+
+  // Brute force: try every permutation and keep the shortest
+  if (stops.length <= 10) {
+    let bestRoute = stops
+    let bestDist = routeDist(stops)
+
+    const permute = (arr: Stop[], start: number) => {
+      if (start === arr.length) {
+        const d = routeDist(arr)
+        if (d < bestDist) { bestDist = d; bestRoute = [...arr] }
+        return
+      }
+      for (let i = start; i < arr.length; i++) {
+        ;[arr[start], arr[i]] = [arr[i], arr[start]]
+        permute(arr, start + 1)
+        ;[arr[start], arr[i]] = [arr[i], arr[start]]
+      }
+    }
+    permute([...stops], 0)
+    return bestRoute
+  }
+
+  // Nearest-neighbour for larger routes, then 2-opt improvement
   const unvisited = [...stops]
   const route: Stop[] = []
-  let current = depot
+  let current: { lat: number; lng: number } = depot
 
   while (unvisited.length > 0) {
     let nearestIdx = 0
-    let minDist = haversineDistance(current.lat, current.lng, unvisited[0].lat, unvisited[0].lng)
-
+    let minDist = dist(current, unvisited[0])
     for (let i = 1; i < unvisited.length; i++) {
-      const dist = haversineDistance(current.lat, current.lng, unvisited[i].lat, unvisited[i].lng)
-      if (dist < minDist) { minDist = dist; nearestIdx = i }
+      const d = dist(current, unvisited[i])
+      if (d < minDist) { minDist = d; nearestIdx = i }
     }
-
     route.push(unvisited[nearestIdx])
     current = unvisited[nearestIdx]
     unvisited.splice(nearestIdx, 1)
   }
 
-  return route
+  // 2-opt: repeatedly reverse segments to eliminate crossing edges
+  let best = route
+  let improved = true
+  while (improved) {
+    improved = false
+    for (let i = 0; i < best.length - 1; i++) {
+      for (let j = i + 1; j < best.length; j++) {
+        const candidate = [...best.slice(0, i), ...best.slice(i, j + 1).reverse(), ...best.slice(j + 1)]
+        if (routeDist(candidate) < routeDist(best)) { best = candidate; improved = true }
+      }
+    }
+  }
+  return best
 }

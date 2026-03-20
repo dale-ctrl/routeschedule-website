@@ -5,7 +5,7 @@ import { PageHeader } from '@/components/ui/PageHeader'
 import { Button } from '@/components/ui/Button'
 import { Modal } from '@/components/ui/Modal'
 import { Input, Select, TextArea } from '@/components/ui/Input'
-import { Plus, Pencil, Trash2, ToggleLeft, ToggleRight, Zap } from 'lucide-react'
+import { Plus, Pencil, Trash2, ToggleLeft, ToggleRight, Zap, Sparkles, Wand2 } from 'lucide-react'
 
 interface Rule {
   id: string
@@ -38,6 +38,7 @@ const CONDITION_FIELDS = [
   { value: 'weight', label: 'Weight (kg)' },
   { value: 'notes', label: 'Notes' },
   { value: 'reference', label: 'Reference' },
+  { value: 'depot', label: 'Depot' },
 ]
 
 const OPERATORS = [
@@ -54,6 +55,8 @@ const ACTION_TYPES = [
   { value: 'assign_day', label: 'Assign to single day' },
   { value: 'assign_days', label: 'Assign to multiple allowed days' },
   { value: 'set_run_weight_limit', label: 'Set max weight per truck run (kg)' },
+  { value: 'set_min_truck_load', label: 'Consolidate trucks — minimum load % before using a second truck' },
+  { value: 'assign_truck_type', label: 'Require specific truck type' },
   { value: 'set_area', label: 'Set area label' },
   { value: 'set_priority', label: 'Set priority (0–10)' },
   { value: 'set_delivery_time', label: 'Set delivery time' },
@@ -69,6 +72,8 @@ const RULE_TYPES = [
   { value: 'time_window', label: 'Time Window' },
   { value: 'priority', label: 'Priority Rule' },
   { value: 'block', label: 'Block Rule' },
+  { value: 'truck_consolidation', label: 'Truck Consolidation' },
+  { value: 'ai_natural', label: 'AI Natural Language Rule' },
   { value: 'general', label: 'General' },
 ]
 
@@ -83,20 +88,49 @@ const emptyRule = {
   actions: [{ type: 'assign_day', value: 'monday' }] as Action[],
 }
 
+interface AISuggestResult {
+  structured: boolean
+  name: string
+  description?: string
+  notes?: string
+  type?: string
+  conditionLogic?: string
+  conditions?: Condition[]
+  actions?: Action[]
+}
+
 export default function RulesPage() {
   const [rules, setRules] = useState<Rule[]>([])
+  const [truckTypes, setTruckTypes] = useState<string[]>([])
   const [loading, setLoading] = useState(true)
   const [editModal, setEditModal] = useState(false)
   const [editingRule, setEditingRule] = useState<typeof emptyRule | null>(null)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
 
+  // AI rule modal state
+  const [aiModal, setAiModal] = useState(false)
+  const [aiDescription, setAiDescription] = useState('')
+  const [aiName, setAiName] = useState('')
+  const [aiConverting, setAiConverting] = useState(false)
+  const [aiResult, setAiResult] = useState<AISuggestResult | null>(null)
+  const [aiSaving, setAiSaving] = useState(false)
+  const [aiEditingId, setAiEditingId] = useState<string | null>(null)
+
   const fetchRules = useCallback(() => {
     setLoading(true)
     fetch('/api/rules').then((r) => r.json()).then(setRules).finally(() => setLoading(false))
   }, [])
 
-  useEffect(() => { fetchRules() }, [fetchRules])
+  useEffect(() => {
+    fetchRules()
+    fetch('/api/trucks')
+      .then((r) => r.json())
+      .then((trucks: { type: string }[]) => {
+        const unique = [...new Set(trucks.map((t) => t.type).filter(Boolean))]
+        setTruckTypes(unique)
+      })
+  }, [fetchRules])
 
   const openNew = () => {
     setEditingRule({ ...emptyRule, conditions: [{ field: 'postcode', operator: 'starts_with', value: '' }], actions: [{ type: 'assign_day', value: 'monday' }] })
@@ -104,7 +138,23 @@ export default function RulesPage() {
     setEditModal(true)
   }
 
+  const openNewAI = () => {
+    setAiDescription('')
+    setAiName('')
+    setAiResult(null)
+    setAiEditingId(null)
+    setAiModal(true)
+  }
+
   const openEdit = (rule: Rule) => {
+    if (rule.type === 'ai_natural') {
+      setAiDescription(rule.description ?? '')
+      setAiName(rule.name)
+      setAiResult(null)
+      setAiEditingId(rule.id)
+      setAiModal(true)
+      return
+    }
     setEditingRule({
       name: rule.name,
       description: rule.description ?? '',
@@ -165,15 +215,71 @@ export default function RulesPage() {
     setEditingRule({ ...editingRule, actions: acts })
   }
 
+  const handleAIConvert = async () => {
+    if (!aiDescription.trim()) return
+    setAiConverting(true)
+    setAiResult(null)
+    try {
+      const res = await fetch('/api/rules/ai-suggest', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ description: aiDescription }),
+      })
+      const data = await res.json()
+      if (res.ok) {
+        setAiResult(data)
+        if (!aiName && data.name) setAiName(data.name)
+      } else {
+        setAiResult({ structured: false, name: aiName || 'Custom Rule', notes: data.error })
+      }
+    } finally {
+      setAiConverting(false)
+    }
+  }
+
+  const handleAISaveAsStructured = async () => {
+    if (!aiResult?.structured) return
+    setAiSaving(true)
+    const body = {
+      name: aiName || aiResult.name || 'AI Rule',
+      description: aiResult.description ?? aiDescription,
+      type: aiResult.type || 'general',
+      conditionLogic: aiResult.conditionLogic || 'AND',
+      conditions: aiResult.conditions ?? [],
+      actions: aiResult.actions ?? [],
+      priority: 0,
+      active: true,
+    }
+    const url = aiEditingId ? `/api/rules/${aiEditingId}` : '/api/rules'
+    const method = aiEditingId ? 'PUT' : 'POST'
+    await fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    setAiSaving(false)
+    closeAIModal()
+    fetchRules()
+  }
+
+  const closeAIModal = () => {
+    setAiModal(false)
+    setAiDescription('')
+    setAiName('')
+    setAiResult(null)
+    setAiEditingId(null)
+  }
+
   return (
     <div className="flex flex-col min-h-full">
       <PageHeader
         title="Rules Engine"
         subtitle="Configure automatic scheduling and routing rules"
         actions={
-          <Button size="sm" onClick={openNew}>
-            <Plus size={14} /> Add Rule
-          </Button>
+          <div className="flex gap-2">
+            <Button size="sm" variant="secondary" onClick={openNewAI}>
+              <Sparkles size={14} /> Add AI Rule
+            </Button>
+            <Button size="sm" onClick={openNew}>
+              <Plus size={14} /> Add Rule
+            </Button>
+          </div>
         }
       />
 
@@ -184,8 +290,8 @@ export default function RulesPage() {
             <div>
               <p className="text-sm font-medium text-sky-800">How rules work</p>
               <p className="text-sm text-sky-700 mt-1">
-                Rules are applied when you import orders. Each rule has <strong>conditions</strong> (when it applies — joined by AND or OR) and <strong>actions</strong> (what it does).
-                Higher priority rules run first. Use <strong>OR</strong> to match any of several postcodes or areas. Use <strong>multiple allowed days</strong> to let an order run on Tuesday or Friday.
+                Rules are applied when you import orders. Each rule has <strong>conditions</strong> (when it applies) and <strong>actions</strong> (what it does).
+                Use <strong>Add AI Rule</strong> to describe a rule in plain English — the system will automatically convert it or remember it as an AI rule applied at import.
               </p>
             </div>
           </div>
@@ -197,46 +303,62 @@ export default function RulesPage() {
           <div className="space-y-3">
             {rules.length === 0 && (
               <div className="bg-white rounded-xl border border-gray-200 p-12 text-center text-gray-400">
-                No rules yet. Click <strong>Add Rule</strong> to create your first scheduling rule.
+                No rules yet. Click <strong>Add AI Rule</strong> to describe a rule in plain English, or <strong>Add Rule</strong> to build one manually.
               </div>
             )}
             {rules.map((rule) => (
-              <div key={rule.id} className={`bg-white rounded-xl border border-gray-200 p-4 ${!rule.active ? 'opacity-50' : ''}`}>
+              <div key={rule.id} className={`bg-white rounded-xl border p-4 ${!rule.active ? 'opacity-50' : ''} ${rule.type === 'ai_natural' ? 'border-purple-200' : 'border-gray-200'}`}>
                 <div className="flex items-start justify-between gap-4">
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2 flex-wrap">
                       <span className="font-semibold text-gray-900">{rule.name}</span>
-                      <span className="text-xs bg-gray-100 text-gray-500 px-2 py-0.5 rounded-full">{rule.type}</span>
+                      {rule.type === 'ai_natural' ? (
+                        <span className="text-xs bg-purple-100 text-purple-700 px-2 py-0.5 rounded-full flex items-center gap-1">
+                          <Sparkles size={10} /> AI Rule
+                        </span>
+                      ) : (
+                        <span className="text-xs bg-gray-100 text-gray-500 px-2 py-0.5 rounded-full">{rule.type}</span>
+                      )}
                       <span className="text-xs bg-purple-100 text-purple-600 px-2 py-0.5 rounded-full">Priority {rule.priority}</span>
-                      <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${rule.conditionLogic === 'OR' ? 'bg-orange-100 text-orange-600' : 'bg-blue-100 text-blue-600'}`}>
-                        {rule.conditionLogic} conditions
-                      </span>
+                      {rule.type !== 'ai_natural' && (
+                        <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${rule.conditionLogic === 'OR' ? 'bg-orange-100 text-orange-600' : 'bg-blue-100 text-blue-600'}`}>
+                          {rule.conditionLogic} conditions
+                        </span>
+                      )}
                     </div>
-                    {rule.description && <p className="text-sm text-gray-500 mt-1">{rule.description}</p>}
 
-                    <div className="mt-3 flex flex-wrap items-center gap-2">
-                      <span className="text-xs text-gray-400 font-medium">IF</span>
-                      {JSON.parse(rule.conditions).map((c: Condition, i: number, arr: Condition[]) => (
-                        <span key={i} className="flex items-center gap-1">
-                          <span className="text-xs bg-blue-50 text-blue-700 px-2 py-1 rounded-md">
-                            {c.field} {c.operator.replace(/_/g, ' ')} &ldquo;{c.value}&rdquo;
-                          </span>
-                          {i < arr.length - 1 && (
-                            <span className={`text-xs font-bold px-1 ${rule.conditionLogic === 'OR' ? 'text-orange-500' : 'text-blue-500'}`}>
-                              {rule.conditionLogic}
+                    {rule.type === 'ai_natural' ? (
+                      <p className="text-sm text-gray-700 mt-2 bg-purple-50 rounded-lg px-3 py-2 border border-purple-100">
+                        {rule.description ?? '(no description)'}
+                      </p>
+                    ) : (
+                      <>
+                        {rule.description && <p className="text-sm text-gray-500 mt-1">{rule.description}</p>}
+                        <div className="mt-3 flex flex-wrap items-center gap-2">
+                          <span className="text-xs text-gray-400 font-medium">IF</span>
+                          {JSON.parse(rule.conditions).map((c: Condition, i: number, arr: Condition[]) => (
+                            <span key={i} className="flex items-center gap-1">
+                              <span className="text-xs bg-blue-50 text-blue-700 px-2 py-1 rounded-md">
+                                {c.field} {c.operator.replace(/_/g, ' ')} &ldquo;{c.value}&rdquo;
+                              </span>
+                              {i < arr.length - 1 && (
+                                <span className={`text-xs font-bold px-1 ${rule.conditionLogic === 'OR' ? 'text-orange-500' : 'text-blue-500'}`}>
+                                  {rule.conditionLogic}
+                                </span>
+                              )}
                             </span>
-                          )}
-                        </span>
-                      ))}
-                    </div>
-                    <div className="mt-2 flex flex-wrap items-center gap-2">
-                      <span className="text-xs text-gray-400 font-medium">THEN:</span>
-                      {JSON.parse(rule.actions).map((a: Action, i: number) => (
-                        <span key={i} className="text-xs bg-green-50 text-green-700 px-2 py-1 rounded-md">
-                          {a.type.replace(/_/g, ' ')} → {a.value}
-                        </span>
-                      ))}
-                    </div>
+                          ))}
+                        </div>
+                        <div className="mt-2 flex flex-wrap items-center gap-2">
+                          <span className="text-xs text-gray-400 font-medium">THEN:</span>
+                          {JSON.parse(rule.actions).map((a: Action, i: number) => (
+                            <span key={i} className="text-xs bg-green-50 text-green-700 px-2 py-1 rounded-md">
+                              {a.type.replace(/_/g, ' ')} → {a.value}
+                            </span>
+                          ))}
+                        </div>
+                      </>
+                    )}
                   </div>
 
                   <div className="flex items-center gap-1 shrink-0">
@@ -257,6 +379,7 @@ export default function RulesPage() {
         )}
       </div>
 
+      {/* Standard rule edit modal */}
       <Modal open={editModal} onClose={() => setEditModal(false)} title={editingId ? 'Edit Rule' : 'New Rule'} size="xl">
         {editingRule && (
           <div className="space-y-5">
@@ -278,7 +401,6 @@ export default function RulesPage() {
               <div className="flex items-center justify-between mb-2">
                 <div className="flex items-center gap-3">
                   <label className="text-sm font-semibold text-gray-700">Conditions</label>
-                  {/* AND / OR toggle */}
                   <div className="flex rounded-lg border border-gray-300 overflow-hidden text-xs font-medium">
                     <button
                       type="button"
@@ -393,6 +515,31 @@ export default function RulesPage() {
                         />
                         <span className="text-sm text-gray-500 shrink-0">kg max per truck run</span>
                       </div>
+                    ) : action.type === 'set_min_truck_load' ? (
+                      <div className="flex-1 flex items-center gap-2">
+                        <input
+                          type="number"
+                          min="1"
+                          max="100"
+                          step="5"
+                          className="w-24 px-2 py-1.5 text-sm border border-gray-300 rounded-lg bg-white"
+                          placeholder="e.g. 70"
+                          value={action.value}
+                          onChange={(e) => updateAction(i, 'value', e.target.value)}
+                        />
+                        <span className="text-sm text-gray-500">% — only send a second truck if the first would be at least this full</span>
+                      </div>
+                    ) : action.type === 'assign_truck_type' ? (
+                      <select
+                        className="flex-1 px-2 py-1.5 text-sm border border-gray-300 rounded-lg bg-white"
+                        value={action.value}
+                        onChange={(e) => updateAction(i, 'value', e.target.value)}
+                      >
+                        <option value="">— select truck type —</option>
+                        {truckTypes.map((t) => (
+                          <option key={t} value={t}>{t}</option>
+                        ))}
+                      </select>
                     ) : (
                       <input className="flex-1 px-2 py-1.5 text-sm border border-gray-300 rounded-lg bg-white" placeholder="Value" value={action.value} onChange={(e) => updateAction(i, 'value', e.target.value)} />
                     )}
@@ -413,6 +560,98 @@ export default function RulesPage() {
             </div>
           </div>
         )}
+      </Modal>
+
+      {/* AI Rule modal */}
+      <Modal open={aiModal} onClose={closeAIModal} title={aiEditingId ? 'Edit AI Rule' : 'Add Rule with AI'} size="lg">
+        <div className="space-y-4">
+          <div className="bg-purple-50 border border-purple-200 rounded-lg p-3">
+            <p className="text-sm text-purple-800">
+              Describe what you want the rule to do in plain English. The AI will try to convert it to a structured rule automatically.
+              If it&apos;s too complex, it&apos;ll be saved as an AI rule and applied intelligently at import time.
+            </p>
+          </div>
+
+          <Input
+            label="Rule name (optional — AI will suggest one)"
+            value={aiName}
+            onChange={(e) => setAiName(e.target.value)}
+            placeholder="e.g. Cornwall AM deliveries"
+          />
+
+          <TextArea
+            label="Describe the rule in plain English"
+            value={aiDescription}
+            onChange={(e) => setAiDescription(e.target.value)}
+            placeholder="e.g. All orders going to TR postcodes should be delivered on Tuesdays and Thursdays, in the morning. They should have priority 5."
+            rows={4}
+          />
+
+          <Button
+            onClick={handleAIConvert}
+            loading={aiConverting}
+            disabled={!aiDescription.trim()}
+            variant="secondary"
+          >
+            <Wand2 size={14} /> Convert with AI
+          </Button>
+
+          {/* AI conversion result */}
+          {aiResult && (
+            <div className={`rounded-lg border p-4 space-y-3 ${aiResult.structured ? 'border-green-200 bg-green-50' : 'border-amber-200 bg-amber-50'}`}>
+              {aiResult.structured ? (
+                <>
+                  <p className="text-sm font-medium text-green-800">Rule converted — will run locally with no AI cost.</p>
+                  {aiResult.description && (
+                    <p className="text-sm text-green-700">{aiResult.description}</p>
+                  )}
+                  {aiResult.conditions && aiResult.conditions.length > 0 && (
+                    <div className="flex flex-wrap gap-1.5">
+                      <span className="text-xs text-gray-500 font-medium">IF</span>
+                      {aiResult.conditions.map((c, i) => (
+                        <span key={i} className="text-xs bg-blue-100 text-blue-700 px-2 py-0.5 rounded">
+                          {c.field} {c.operator.replace(/_/g, ' ')} &ldquo;{c.value}&rdquo;
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                  {aiResult.actions && aiResult.actions.length > 0 && (
+                    <div className="flex flex-wrap gap-1.5">
+                      <span className="text-xs text-gray-500 font-medium">THEN</span>
+                      {aiResult.actions.map((a, i) => (
+                        <span key={i} className="text-xs bg-green-100 text-green-700 px-2 py-0.5 rounded">
+                          {a.type.replace(/_/g, ' ')} → {a.value}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                  {aiResult.notes && (
+                    <p className="text-xs text-green-600 italic">{aiResult.notes}</p>
+                  )}
+                  <Button onClick={handleAISaveAsStructured} loading={aiSaving}>
+                    Save Rule
+                  </Button>
+                </>
+              ) : (
+                <div className="space-y-2">
+                  <p className="text-sm font-medium text-amber-800">
+                    Couldn&apos;t fully structure this rule automatically.
+                  </p>
+                  {aiResult.notes && (
+                    <p className="text-sm text-amber-700">{aiResult.notes}</p>
+                  )}
+                  <p className="text-sm text-amber-700">
+                    Try rephrasing it more specifically — e.g. specify exact postcodes, days, or customer names. You can also add it manually using <strong>Add Rule</strong>.
+                  </p>
+                </div>
+              )}
+            </div>
+          )}
+
+          <div className="flex gap-2 pt-2 border-t border-gray-100">
+            <Button variant="secondary" onClick={closeAIModal}>Cancel</Button>
+          </div>
+        </div>
       </Modal>
     </div>
   )

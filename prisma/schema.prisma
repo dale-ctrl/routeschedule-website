@@ -40,8 +40,9 @@ model Order {
   scheduledDay String?
   importBatch  String?
   deliveryTime String?
-  priority     Int         @default(0)
-  depot        String?
+  priority          Int         @default(0)
+  depot             String?
+  preferredTruckType String?
   createdAt    DateTime    @default(now())
   updatedAt    DateTime    @updatedAt
   routeStops   RouteStop[]

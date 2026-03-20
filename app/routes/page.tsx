@@ -4,7 +4,7 @@ import { useEffect, useState, useCallback } from 'react'
 import { PageHeader } from '@/components/ui/PageHeader'
 import { Button } from '@/components/ui/Button'
 import { Modal } from '@/components/ui/Modal'
-import { Input, Select } from '@/components/ui/Input'
+import { Input } from '@/components/ui/Input'
 import { statusBadge } from '@/components/ui/Badge'
 import { formatWeight, formatDuration, formatDistance } from '@/lib/utils'
 import { Plus, Trash2, Eye, Zap } from 'lucide-react'
@@ -43,6 +43,17 @@ const DAYS = [
   { value: 'saturday', label: 'Saturday' },
 ]
 
+const DAY_NAMES = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday']
+
+function getNextWorkingDay(): { date: string; day: string } {
+  const next = new Date()
+  next.setDate(next.getDate() + 1)
+  while (next.getDay() === 0 || next.getDay() === 6) {
+    next.setDate(next.getDate() + 1)
+  }
+  return { date: format(next, 'yyyy-MM-dd'), day: DAY_NAMES[next.getDay()] }
+}
+
 export default function RoutesPage() {
   const [routes, setRoutes] = useState<Route[]>([])
   const [trucks, setTrucks] = useState<Truck[]>([])
@@ -52,7 +63,7 @@ export default function RoutesPage() {
   const [generateModal, setGenerateModal] = useState(false)
   const [generating, setGenerating] = useState(false)
   const [generateResult, setGenerateResult] = useState<string | null>(null)
-  const [genForm, setGenForm] = useState({ day: 'monday', date: format(new Date(), 'yyyy-MM-dd'), includeUnassigned: false })
+  const [genForm, setGenForm] = useState(() => ({ ...getNextWorkingDay(), includeUnassigned: true }))
   const [preview, setPreview] = useState<{ dayCount: number; unassignedCount: number } | null>(null)
 
   const fetchRoutes = useCallback((depot: string) => {
@@ -89,8 +100,9 @@ export default function RoutesPage() {
       })
       const data = await res.json()
       if (res.ok) {
-        setGenerateResult(`Generated ${data.total} route(s) with ${data.ordersRouted} orders.`)
         fetchRoutes(selectedDepot)
+        setGenerateModal(false)
+        setGenerateResult(null)
         setPreview(null)
       } else {
         setGenerateResult('Error: ' + (data.error ?? 'Unknown error'))
@@ -193,20 +205,17 @@ export default function RoutesPage() {
       {/* Generate Routes Modal */}
       <Modal open={generateModal} onClose={() => { setGenerateModal(false); setGenerateResult(null); setPreview(null) }} title="Generate Routes" size="md">
         <div className="space-y-4">
-          <Select
-            label="Day"
-            value={genForm.day}
-            onChange={(e) => {
-              setGenForm({ ...genForm, day: e.target.value })
-              fetchPreview(e.target.value, selectedDepot)
-            }}
-            options={DAYS}
-          />
           <Input
             label="Route Date"
             type="date"
             value={genForm.date}
-            onChange={(e) => setGenForm({ ...genForm, date: e.target.value })}
+            onChange={(e) => {
+              const d = new Date(e.target.value + 'T12:00:00')
+              const day = DAY_NAMES[d.getDay()] ?? genForm.day
+              const updated = { ...genForm, date: e.target.value, day }
+              setGenForm(updated)
+              fetchPreview(updated.day, selectedDepot)
+            }}
           />
 
           {/* Preview counts */}

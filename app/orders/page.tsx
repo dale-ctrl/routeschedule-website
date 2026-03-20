@@ -7,7 +7,7 @@ import { Modal } from '@/components/ui/Modal'
 import { Input, Select } from '@/components/ui/Input'
 import { statusBadge } from '@/components/ui/Badge'
 import { formatWeight } from '@/lib/utils'
-import { Upload, Plus, Trash2, Search, RefreshCw, Pencil } from 'lucide-react'
+import { Upload, Plus, Trash2, Search, RefreshCw, Pencil, RotateCcw } from 'lucide-react'
 import Papa from 'papaparse'
 import * as XLSX from 'xlsx'
 
@@ -69,6 +69,7 @@ export default function OrdersPage() {
   const [importing, setImporting] = useState(false)
   const [importResult, setImportResult] = useState<string | null>(null)
   const [geocoding, setGeocoding] = useState(false)
+  const [resetting, setResetting] = useState(false)
   const fileRef = useRef<HTMLInputElement>(null)
 
   const LIMIT = 50
@@ -112,41 +113,10 @@ export default function OrdersPage() {
         rows = XLSX.utils.sheet_to_json<Record<string, string>>(ws)
       }
 
-      // Normalise column names (case insensitive, strips report suffixes like "(MAX)", "(SUM)")
-      const normalised = rows.map((row) => {
-        // Strip parenthetical suffixes added by reporting tools e.g. "Order Weight (SUM)" → "order weight"
-        const stripSuffix = (s: string) => s.replace(/\s*\([^)]+\)\s*$/, '').trim().toLowerCase()
-        const get = (...keys: string[]) => {
-          for (const k of keys) {
-            const found = Object.keys(row).find((r) => stripSuffix(r) === k.toLowerCase())
-            if (found) return row[found]
-          }
-          return ''
-        }
-        return {
-          // BKG_DESCRIPTION = customer name
-          customer: get('bkg_description', 'customer', 'company', 'name', 'customer name'),
-          // BGK_USER_CHAR3 = postcode (note: BGK not BKG — typo in their system)
-          postcode: get('bgk_user_char3', 'bkg_user_char3', 'postcode', 'post code', 'zip', 'postal code'),
-          // Order Weight = weight in kg
-          weight: get('order weight', 'weight', 'weight (kg)', 'weight(kg)', 'kg', 'weight kg'),
-          // BGK_USER_CHAR1 = reference/job number
-          reference: get('bgk_user_char1', 'bkg_user_char1', 'reference', 'ref', 'order ref', 'order number', 'job number', 'po'),
-          // BGK_USER_NOTES1 = full delivery address
-          address: get('bgk_user_notes1', 'bkg_user_notes1', 'address', 'delivery address', 'addr'),
-          notes: get('notes', 'note', 'comments', 'comment'),
-          area: get('area', 'region', 'zone', 'area location'),
-          // BKG_START = delivery time (Excel datetime, parsed to am/pm on server)
-          deliveryTime: get('bkg_start', 'delivery time', 'deliverytime', 'time', 'am/pm', 'window', 'slot'),
-          // Despatch Office = depot
-          depot: get('despatch office', 'bkg_despatch', 'depot', 'despatch', 'office', 'dispatch office', 'dispatch'),
-        }
-      }).filter((r) => r.customer || r.postcode)
-
       const res = await fetch('/api/orders/import', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ rows: normalised }),
+        body: JSON.stringify({ rows }),
       })
       const data = await res.json()
       if (!res.ok) {
@@ -167,6 +137,21 @@ export default function OrdersPage() {
     await fetch(`/api/orders?ids=${ids.join(',')}`, { method: 'DELETE' })
     setSelected(new Set())
     fetchOrders()
+  }
+
+  const handleResetToPending = async () => {
+    const ids = selected.size > 0 ? [...selected] : null
+    const msg = ids ? `Reset ${ids.length} selected order(s) to pending?` : 'Reset ALL scheduled orders back to pending?'
+    if (!confirm(msg)) return
+    setResetting(true)
+    await fetch('/api/orders', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(ids ? { ids, status: 'pending' } : { status: 'pending' }),
+    })
+    setSelected(new Set())
+    fetchOrders()
+    setResetting(false)
   }
 
   const handleGeocode = async () => {
@@ -200,6 +185,9 @@ export default function OrdersPage() {
           <>
             <Button variant="secondary" size="sm" onClick={handleGeocode} loading={geocoding}>
               <RefreshCw size={14} /> Geocode
+            </Button>
+            <Button variant="secondary" size="sm" onClick={handleResetToPending} loading={resetting}>
+              <RotateCcw size={14} /> {selected.size > 0 ? `Reset to Pending (${selected.size})` : 'Reset All to Pending'}
             </Button>
             {selected.size > 0 && (
               <Button variant="danger" size="sm" onClick={() => handleDelete([...selected])}>
@@ -374,6 +362,7 @@ export default function OrdersPage() {
       {editOrder && (
         <EditOrderModal
           order={editOrder}
+          depots={depots}
           onClose={() => setEditOrder(null)}
           onSaved={() => { setEditOrder(null); fetchOrders() }}
         />
@@ -382,7 +371,7 @@ export default function OrdersPage() {
   )
 }
 
-function EditOrderModal({ order, onClose, onSaved }: { order: Order; onClose: () => void; onSaved: () => void }) {
+function EditOrderModal({ order, depots, onClose, onSaved }: { order: Order; depots: Depot[]; onClose: () => void; onSaved: () => void }) {
   const [form, setForm] = useState({ ...order, weight: String(order.weight), priority: String(order.priority ?? 0) })
   const [saving, setSaving] = useState(false)
 
@@ -430,6 +419,19 @@ function EditOrderModal({ order, onClose, onSaved }: { order: Order; onClose: ()
           />
         </div>
         <Input label="Notes" value={form.notes ?? ''} onChange={(e) => setForm({ ...form, notes: e.target.value })} />
+        {depots.length > 0 && (
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Depot</label>
+            <select
+              className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-sky-500"
+              value={form.depot ?? ''}
+              onChange={(e) => setForm({ ...form, depot: e.target.value || null })}
+            >
+              <option value="">No depot</option>
+              {depots.map((d) => <option key={d.id} value={d.name}>{d.name}</option>)}
+            </select>
+          </div>
+        )}
         <div className="flex gap-2 pt-2">
           <Button onClick={handleSave} loading={saving}>Save Changes</Button>
           <Button variant="secondary" onClick={onClose}>Cancel</Button>

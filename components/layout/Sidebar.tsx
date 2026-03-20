@@ -13,8 +13,10 @@ import {
   Settings,
   ChevronLeft,
   ChevronRight,
+  LogOut,
 } from 'lucide-react'
 import { useState } from 'react'
+import { useRouter } from 'next/navigation'
 import { cn } from '@/lib/utils'
 
 const NAV = [
@@ -30,7 +32,13 @@ const NAV = [
 
 export function Sidebar() {
   const pathname = usePathname()
+  const router = useRouter()
   const [collapsed, setCollapsed] = useState(false)
+
+  const handleLogout = async () => {
+    await fetch('/api/auth/logout', { method: 'POST' })
+    router.push('/login')
+  }
 
   return (
     <aside
@@ -74,6 +82,16 @@ export function Sidebar() {
           )
         })}
       </nav>
+
+      {/* Logout */}
+      <button
+        onClick={handleLogout}
+        className="flex items-center gap-3 px-4 py-2.5 mx-2 mb-1 rounded-lg text-sm text-gray-400 hover:bg-white/5 hover:text-white transition-colors"
+        title={collapsed ? 'Sign out' : undefined}
+      >
+        <LogOut size={18} className="shrink-0" />
+        {!collapsed && <span>Sign out</span>}
+      </button>
 
       {/* Collapse toggle */}
       <button

@@ -1,7 +1,7 @@
 import { prisma } from '@/lib/prisma'
 import { assignToTrucks, optimizeStopOrder } from '@/lib/route-optimizer'
-import { getRouteDetails } from '@/lib/routing'
-import { parseRule, getRouteWeightLimit } from '@/lib/rules-engine'
+import { getRouteDetails, osrmTripOptimize } from '@/lib/routing'
+import { parseRule, getRouteWeightLimit, getMinTruckLoadPct } from '@/lib/rules-engine'
 
 export async function POST(request: Request) {
   try {
@@ -25,21 +25,9 @@ export async function POST(request: Request) {
 
     const orders = allPending.filter((o) => {
       if (depot && o.depot !== depot) return false
-      if (!o.scheduledDay) {
-        // Include orders with no day assigned if the option is checked
-        return includeUnassigned === true
-      }
+      if (!o.scheduledDay) return includeUnassigned === true
       return o.scheduledDay.split(',').map((d) => d.trim()).includes(day)
     })
-
-    // Look up depot coordinates
-    let depotLocation = { lat: 51.5, lng: -1.8 } // fallback
-    if (depot) {
-      const depotRecord = await prisma.depot.findUnique({ where: { name: depot } })
-      if (depotRecord?.lat && depotRecord?.lng) {
-        depotLocation = { lat: depotRecord.lat, lng: depotRecord.lng }
-      }
-    }
 
     if (orders.length === 0) {
       return Response.json(
@@ -52,113 +40,131 @@ export async function POST(request: Request) {
       )
     }
 
-    // Get trucks — filter by depot if one is selected, otherwise only use trucks with no depot assigned
+    // Fetch trucks
     const trucks = await prisma.truck.findMany({
       where: {
         active: true,
-        ...(truckIds && truckIds.length > 0
-          ? { id: { in: truckIds } }
-          : depot
-          ? { depot }
-          : {}),
+        ...(truckIds && truckIds.length > 0 ? { id: { in: truckIds } } : {}),
       },
     })
 
     if (trucks.length === 0) {
-      return Response.json(
-        { error: depot ? `No active trucks assigned to the ${depot} depot.` : 'No active trucks available.' },
-        { status: 400 }
-      )
+      return Response.json({ error: 'No active trucks available.' }, { status: 400 })
     }
 
-    // Evaluate route-level weight limit rules
+    // Evaluate rules once across all orders
     const allRules = await prisma.rule.findMany({ where: { active: true } })
     const parsedRules = allRules.map(parseRule)
     const ordersForRules = orders.map((o) => ({
-      id: o.id,
-      postcode: o.postcode,
-      area: o.area,
-      weight: o.weight,
-      customer: o.customer,
-      notes: o.notes,
-      reference: o.reference,
-      deliveryTime: o.deliveryTime,
-      scheduledDay: o.scheduledDay,
-      priority: o.priority,
+      id: o.id, postcode: o.postcode, area: o.area, weight: o.weight,
+      customer: o.customer, notes: o.notes, reference: o.reference,
+      deliveryTime: o.deliveryTime, scheduledDay: o.scheduledDay,
+      priority: o.priority, depot: o.depot,
     }))
     const routeWeightLimit = getRouteWeightLimit(parsedRules, ordersForRules)
+    const minTruckLoadPct = getMinTruckLoadPct(parsedRules, ordersForRules)
 
-    const trucksWithLimit = trucks.map((t) => ({
-      ...t,
-      capacity: routeWeightLimit !== null ? Math.min(t.capacity, routeWeightLimit) : t.capacity,
-    }))
+    // Determine depot groups to process.
+    // If a specific depot was requested, just one group.
+    // Otherwise split orders by their depot field so Andover orders never go to Plymouth trucks.
+    const depotKeys: (string | null)[] = depot
+      ? [depot]
+      : [...new Set(orders.map((o) => o.depot ?? null))]
 
-    const stops = orders.map((o) => ({
-      id: o.id,
-      lat: o.lat!,
-      lng: o.lng!,
-      weight: o.weight,
-      customer: o.customer,
-      postcode: o.postcode,
-      address: o.address,
-      deliveryTime: o.deliveryTime,
-      priority: o.priority,
-    }))
+    const createdRoutes: { routeId: string; routeName: string; stops: number }[] = []
+    const errors: string[] = []
 
-    const assignments = assignToTrucks(stops, trucksWithLimit)
-    const createdRoutes = []
+    for (const depotKey of depotKeys) {
+      // Orders for this depot group
+      const depotOrders = depot ? orders : orders.filter((o) => (o.depot ?? null) === depotKey)
 
-    for (const assignment of assignments) {
-      const truck = trucks.find((t) => t.id === assignment.truckId)!
-      const orderedStops = optimizeStopOrder(assignment.stops, depotLocation)
+      // Trucks for this depot group
+      const depotTrucks = (truckIds && truckIds.length > 0)
+        ? trucks
+        : trucks.filter((t) => (t.depot ?? null) === depotKey)
 
-      let routeDetails = null
-      if (orderedStops.length > 0) {
-        const origin = depotLocation
-        const destination = orderedStops[orderedStops.length - 1]
-        const waypoints = orderedStops.slice(0, -1)
-        routeDetails = await getRouteDetails(origin, destination, waypoints)
+      if (depotTrucks.length === 0) {
+        errors.push(`No active trucks assigned to ${depotKey ?? 'unassigned'} depot — ${depotOrders.length} order(s) skipped.`)
+        continue
       }
 
-      const routeName = `${truck.name} - ${day.charAt(0).toUpperCase() + day.slice(1)} ${date}`
+      // Look up depot coordinates
+      let depotLocation = { lat: 51.5, lng: -1.8 }
+      if (depotKey) {
+        const depotRecord = await prisma.depot.findUnique({ where: { name: depotKey } })
+        if (depotRecord?.lat && depotRecord?.lng) {
+          depotLocation = { lat: depotRecord.lat, lng: depotRecord.lng }
+        }
+      }
 
-      const route = await prisma.route.create({
-        data: {
-          name: routeName,
-          date: new Date(date + 'T08:00:00.000Z'),
-          truckId: assignment.truckId,
-          status: 'planned',
-          totalWeight: assignment.totalWeight,
-          totalDistance: routeDetails?.totalDistance ?? null,
-          totalDuration: routeDetails?.totalDuration ?? null,
-          depot: depot ?? null,
-        },
-      })
+      const trucksWithLimit = depotTrucks.map((t) => ({
+        ...t,
+        capacity: routeWeightLimit !== null ? Math.min(t.capacity, routeWeightLimit) : t.capacity,
+      }))
 
-      // Use callback-form transaction (compatible with SQLite adapter)
-      await prisma.$transaction(async (tx) => {
-        for (let idx = 0; idx < orderedStops.length; idx++) {
-          const stop = orderedStops[idx]
-          const leg = routeDetails?.legs[idx]
-          await tx.routeStop.create({
-            data: {
-              routeId: route.id,
-              orderId: stop.id,
-              truckId: assignment.truckId,
-              sequence: idx + 1,
-              duration: leg?.duration ?? null,
-              distance: leg?.distance ?? null,
-            },
-          })
+      const stops = depotOrders.map((o) => ({
+        id: o.id, lat: o.lat!, lng: o.lng!, weight: o.weight,
+        customer: o.customer, postcode: o.postcode, address: o.address,
+        deliveryTime: o.deliveryTime, priority: o.priority,
+        preferredTruckType: o.preferredTruckType ?? null,
+      }))
+
+      const assignments = assignToTrucks(stops, trucksWithLimit, minTruckLoadPct)
+
+      for (const assignment of assignments) {
+        const truck = depotTrucks.find((t) => t.id === assignment.truckId)!
+        const orderedStops = await osrmTripOptimize(depotLocation, assignment.stops, optimizeStopOrder)
+
+        let routeDetails = null
+        if (orderedStops.length > 0) {
+          const origin = depotLocation
+          const destination = orderedStops[orderedStops.length - 1]
+          const waypoints = orderedStops.slice(0, -1)
+          routeDetails = await getRouteDetails(origin, destination, waypoints)
         }
 
-        await tx.order.updateMany({
-          where: { id: { in: orderedStops.map((s) => s.id) } },
-          data: { status: 'scheduled' },
-        })
-      })
+        const routeName = `${truck.name} - ${day.charAt(0).toUpperCase() + day.slice(1)} ${date}`
 
-      createdRoutes.push({ routeId: route.id, routeName, stops: orderedStops.length })
+        const route = await prisma.route.create({
+          data: {
+            name: routeName,
+            date: new Date(date + 'T08:00:00.000Z'),
+            truckId: assignment.truckId,
+            status: 'planned',
+            totalWeight: assignment.totalWeight,
+            totalDistance: routeDetails?.totalDistance ?? null,
+            totalDuration: routeDetails?.totalDuration ?? null,
+            depot: depotKey ?? null,
+          },
+        })
+
+        await prisma.$transaction(async (tx) => {
+          for (let idx = 0; idx < orderedStops.length; idx++) {
+            const stop = orderedStops[idx]
+            const leg = routeDetails?.legs[idx]
+            await tx.routeStop.create({
+              data: {
+                routeId: route.id,
+                orderId: stop.id,
+                truckId: assignment.truckId,
+                sequence: idx + 1,
+                duration: leg?.duration ?? null,
+                distance: leg?.distance ?? null,
+              },
+            })
+          }
+          await tx.order.updateMany({
+            where: { id: { in: orderedStops.map((s) => s.id) } },
+            data: { status: 'scheduled' },
+          })
+        })
+
+        createdRoutes.push({ routeId: route.id, routeName, stops: orderedStops.length })
+      }
+    }
+
+    if (createdRoutes.length === 0 && errors.length > 0) {
+      return Response.json({ error: errors.join(' ') }, { status: 400 })
     }
 
     return Response.json({
@@ -166,6 +172,7 @@ export async function POST(request: Request) {
       total: createdRoutes.length,
       ordersRouted: orders.length,
       routeWeightLimitApplied: routeWeightLimit,
+      warnings: errors.length > 0 ? errors : undefined,
     })
   } catch (err) {
     console.error('Route generation error:', err)
