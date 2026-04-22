@@ -467,7 +467,92 @@ export function assignToTrucks(
   // cluster it will fit in, iterating until stable.
   refineByProximity(assignments)
 
+  // London-priority: if any vans exist in the assignment (they only show up here
+  // because overflow/4h-limit required them), move London postcode stops onto them
+  // from trucks, and push the vans' current non-London stops back onto trucks.
+  // The user pays to hire vans — if we've got them, they're best used in London
+  // where restricted access hurts the trucks most.
+  migrateLondonToVans(assignments)
+
   return assignments.filter((a) => a.stops.length > 0)
+}
+
+/**
+ * Move London postcode stops onto Extra Van assignments wherever possible.
+ * Two passes, both looped until stable:
+ *   1. Direct moves: a London stop on a truck hops onto a van that has capacity.
+ *   2. Swaps: when no van has capacity, swap a van's non-London stop out to a
+ *      truck in exchange for a London stop off that truck. This frees van weight
+ *      while still respecting both capacities.
+ * Vans are capped at their per-van capacity; if London weight exceeds total van
+ * capacity, the surplus stays on trucks and we stop.
+ */
+function migrateLondonToVans(assignments: TruckAssignment[]): void {
+  const vans = assignments.filter((a) => a.isExtraVan)
+  if (vans.length === 0) return
+
+  // Pass 1: direct moves — London stop from any non-van into a van with room.
+  let moved = true
+  let iters = 0
+  while (moved && iters < 200) {
+    moved = false
+    iters++
+    for (const van of vans) {
+      for (const other of assignments) {
+        if (other === van || other.isExtraVan) continue
+        for (const stop of [...other.stops]) {
+          if (!isLondonPostcode(stop.postcode)) continue
+          if (van.totalWeight + stop.weight > van.capacity) continue
+          other.stops = other.stops.filter((s) => s.id !== stop.id)
+          other.totalWeight -= stop.weight
+          van.stops.push(stop)
+          van.totalWeight += stop.weight
+          moved = true
+          break
+        }
+        if (moved) break
+      }
+      if (moved) break
+    }
+  }
+
+  // Pass 2: swaps — take a non-London stop off a van and give it to a truck,
+  // in exchange for a London stop on that truck. Weight neutral enough that
+  // both capacities usually survive.
+  let swapped = true
+  iters = 0
+  while (swapped && iters < 200) {
+    swapped = false
+    iters++
+    for (const van of vans) {
+      for (const vanStop of [...van.stops]) {
+        if (isLondonPostcode(vanStop.postcode)) continue
+        for (const truck of assignments) {
+          if (truck.isExtraVan) continue
+          let chosen: Stop | null = null
+          for (const londonStop of truck.stops) {
+            if (!isLondonPostcode(londonStop.postcode)) continue
+            const vanAfter = van.totalWeight - vanStop.weight + londonStop.weight
+            const truckAfter = truck.totalWeight - londonStop.weight + vanStop.weight
+            if (vanAfter > van.capacity || truckAfter > truck.capacity) continue
+            chosen = londonStop
+            break
+          }
+          if (!chosen) continue
+          van.stops = van.stops.filter((s) => s.id !== vanStop.id)
+          truck.stops = truck.stops.filter((s) => s.id !== chosen!.id)
+          van.stops.push(chosen)
+          truck.stops.push(vanStop)
+          van.totalWeight = van.totalWeight - vanStop.weight + chosen.weight
+          truck.totalWeight = truck.totalWeight - chosen.weight + vanStop.weight
+          swapped = true
+          break
+        }
+        if (swapped) break
+      }
+      if (swapped) break
+    }
+  }
 }
 
 function refineByProximity(assignments: TruckAssignment[]): void {
