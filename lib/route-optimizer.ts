@@ -276,6 +276,32 @@ function preferredTypeScore(cluster: Stop[], slotType: string | null | undefined
 }
 
 /**
+ * UK outward-code prefixes covering Greater London and the inner-M25 ring where
+ * big trucks struggle with LEZ/ULEZ/direct-vision standards, low bridges, narrow
+ * streets, and restricted-access zones. Extra Vans handle these better, so clusters
+ * with many London stops should be biased towards Extra Van slots where available.
+ */
+const LONDON_POSTCODE_PREFIXES = new Set([
+  // Inner London
+  'E', 'EC', 'N', 'NW', 'SE', 'SW', 'W', 'WC',
+  // Outer London boroughs
+  'BR', 'CR', 'DA', 'EN', 'HA', 'IG', 'RM', 'UB',
+  // Inner-M25 ring (Surrey/Middlesex) with similar access constraints
+  'KT', 'SM', 'TW',
+])
+
+export function isLondonPostcode(postcode: string | null | undefined): boolean {
+  if (!postcode) return false
+  const match = postcode.trim().toUpperCase().match(/^([A-Z]+)/)
+  if (!match) return false
+  return LONDON_POSTCODE_PREFIXES.has(match[1])
+}
+
+function londonStopCount(cluster: Stop[]): number {
+  return cluster.filter((s) => isLondonPostcode(s.postcode)).length
+}
+
+/**
  * Assign stops to truck slots. One slot = one route.
  *
  * Algorithm:
@@ -331,9 +357,12 @@ export function assignToTrucks(
     // Pick the best available slot for this cluster. Score (higher = better):
     //   + 1000 per stop whose preferredTruckType matches the slot type
     //   + 100 if cluster fits within slot capacity
+    //   + 75 per London-postcode stop if the slot is an Extra Van (trucks struggle in
+    //       restricted-access zones like LEZ/ULEZ, low bridges etc. — vans handle them)
     //   + (same-truck double-run bonus) 50 - distance_km_to_other_run_centroid, if the other run of
     //       the same truck has already been assigned a cluster nearby
     //   - capacity wasted (rough tie-breaker for packing)
+    const londonStops = londonStopCount(cluster)
     let bestIdx = -1
     let bestScore = -Infinity
 
@@ -343,6 +372,7 @@ export function assignToTrucks(
       let score = 0
       score += preferredTypeScore(cluster, slot.type) * 1000
       if (clusterWeight <= slot.capacity) score += 100
+      if (slot.isExtraVan) score += londonStops * 75
       // Double-run affinity: if same truck has another run already with a cluster assigned, prefer
       // putting this cluster near it — that keeps both runs in the same area.
       for (let j = 0; j < activeSlots.length; j++) {
