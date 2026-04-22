@@ -338,46 +338,7 @@ export function assignToTrucks(
     truckCount = Math.max(1, Math.min(truckSlots.length, minTrucks))
   }
   const activeSlots = [...truckSlots.slice(0, truckCount), ...vanSlots]
-
-  // Pre-split clustering: when the depot has both Extra Van slots and London
-  // postcode stops, cluster London and non-London stops separately so London
-  // clusters are van-sized (≤ van capacity) and go onto vans, while trucks
-  // handle the rest. This avoids the previous failure mode where a single big
-  // London cluster was larger than any van's capacity, got excluded from vans
-  // by the hard-capacity filter, and ended up on a truck even though vans were
-  // available. If London weight needs more vans than we have, the surplus
-  // London cluster still ends up on a truck as a tight London-only run (rather
-  // than getting mixed with non-London stops on a single truck route).
-  const activeVanSlots = activeSlots.filter((s) => s.isExtraVan)
-  const londonStops = stops.filter((s) => isLondonPostcode(s.postcode))
-  const nonLondonStops = stops.filter((s) => !isLondonPostcode(s.postcode))
-
-  let clusters: Stop[][]
-  if (activeVanSlots.length > 0 && londonStops.length > 0) {
-    // Only split London into at most as many clusters as we have van slots.
-    // Clustering into more than that (e.g. ceil(londonWeight / vanCap)) steals
-    // cluster budget from the non-London stops, leaving trucks with too few
-    // clusters to carry their share — the resulting giant non-London clusters
-    // exceed truck capacity and rebalance ends up scattering stops everywhere.
-    // When London weight exceeds the vans' combined capacity, the van-cluster
-    // rebalance will push the overflow onto the nearest truck cluster — which
-    // is exactly the "mix a few London stops into a truck route" behaviour the
-    // user wants anyway.
-    const londonClusterCount = Math.min(activeVanSlots.length, londonStops.length)
-    const nonLondonClusterCount = Math.min(
-      activeSlots.length - londonClusterCount,
-      nonLondonStops.length
-    )
-    const londonClusters = londonClusterCount > 0
-      ? geographicCluster(londonStops, londonClusterCount)
-      : []
-    const nonLondonClusters = nonLondonClusterCount > 0
-      ? geographicCluster(nonLondonStops, nonLondonClusterCount)
-      : []
-    clusters = [...londonClusters, ...nonLondonClusters]
-  } else {
-    clusters = geographicCluster(stops, activeSlots.length)
-  }
+  const clusters = geographicCluster(stops, activeSlots.length)
 
   const assignments: TruckAssignment[] = activeSlots.map((s) => ({
     truckId: s.truckId,
@@ -438,18 +399,9 @@ export function assignToTrucks(
     let bestFittingScore = -Infinity
     for (let i = 0; i < activeSlots.length; i++) {
       if (usedSlotIdx.has(i)) continue
-      const slot = activeSlots[i]
       const s = scoreSlot(i)
       if (s > bestScore) { bestScore = s; bestIdx = i }
-      // Vans may provisionally accept a London-heavy cluster that's up to 30% over
-      // their 1.5t capacity — the rebalance loop will push the lightest London
-      // stop(s) off onto the nearest truck cluster, enforcing the hard 1.5t limit
-      // in the final output. Without this slack, a pre-split London cluster at
-      // ~1.85t fails the "fits" test, skips the van, and lands on a truck entirely.
-      const fits =
-        clusterWeight <= slot.capacity ||
-        (slot.isExtraVan && londonStops > 0 && clusterWeight <= slot.capacity * 1.3)
-      if (fits && s > bestFittingScore) {
+      if (clusterWeight <= activeSlots[i].capacity && s > bestFittingScore) {
         bestFittingScore = s
         bestFittingIdx = i
       }
