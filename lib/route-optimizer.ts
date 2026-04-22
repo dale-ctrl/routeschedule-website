@@ -408,7 +408,60 @@ export function assignToTrucks(
     }
   }
 
+  // Geographic refinement: every stop should live in the cluster whose nearest
+  // neighbour is closest. Rebalance only runs when an assignment is over-capacity,
+  // so a stop can end up in a geographically suboptimal cluster whenever the
+  // greedy cluster→slot pairing leaves everything under capacity but slightly
+  // skewed — producing routes that cross each other on the map even though no
+  // single assignment is overloaded. This pass moves each stop to the nearest
+  // cluster it will fit in, iterating until stable.
+  refineByProximity(assignments)
+
   return assignments.filter((a) => a.stops.length > 0)
+}
+
+function refineByProximity(assignments: TruckAssignment[]): void {
+  let improved = true
+  let iters = 0
+  while (improved && iters < 50) {
+    improved = false
+    iters++
+
+    for (const home of assignments) {
+      if (home.stops.length <= 1) continue
+      for (const stop of [...home.stops]) {
+        const hereDist = nearestOtherStopDistance(stop, home)
+        let bestTarget: TruckAssignment | null = null
+        let bestDist = hereDist
+
+        for (const target of assignments) {
+          if (target === home) continue
+          if (target.totalWeight + stop.weight > target.capacity) continue
+          const d = distanceToAssignment(stop, target)
+          if (d < bestDist) { bestDist = d; bestTarget = target }
+        }
+
+        if (bestTarget) {
+          home.stops = home.stops.filter((s) => s.id !== stop.id)
+          home.totalWeight -= stop.weight
+          bestTarget.stops.push(stop)
+          bestTarget.totalWeight += stop.weight
+          improved = true
+        }
+      }
+    }
+  }
+}
+
+/** Distance from a stop to the nearest *other* stop in its own assignment. */
+function nearestOtherStopDistance(stop: Stop, assignment: TruckAssignment): number {
+  let min = Infinity
+  for (const s of assignment.stops) {
+    if (s.id === stop.id) continue
+    const d = haversineDistance(stop.lat, stop.lng, s.lat, s.lng)
+    if (d < min) min = d
+  }
+  return min === Infinity ? 0 : min
 }
 
 /**
