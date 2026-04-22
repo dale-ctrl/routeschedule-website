@@ -1,7 +1,55 @@
 import { prisma } from '@/lib/prisma'
-import { assignToTrucks, optimizeStopOrder } from '@/lib/route-optimizer'
+import {
+  assignToTrucks,
+  optimizeStopOrder,
+  planSlots,
+  EXTRA_VAN_CAPACITY,
+  type TruckSlot,
+} from '@/lib/route-optimizer'
 import { getRouteDetails, osrmTripOptimize } from '@/lib/routing'
 import { parseRule, getRouteWeightLimit, getMinTruckLoadPct } from '@/lib/rules-engine'
+
+/**
+ * Find or create real Truck DB rows to back any Extra Van placeholder slots.
+ * Reuses existing active Extra Van trucks on the depot first, creates new ones as needed.
+ */
+async function resolveExtraVans(
+  slots: TruckSlot[],
+  depotKey: string | null,
+  extraVanCapacity: number
+): Promise<TruckSlot[]> {
+  const placeholderCount = slots.filter((s) => s.isExtraVan).length
+  if (placeholderCount === 0) return slots
+
+  const existing = await prisma.truck.findMany({
+    where: { type: 'Extra Van', depot: depotKey, active: true },
+    orderBy: { createdAt: 'asc' },
+  })
+
+  const pool: { id: string; name: string }[] = existing.map((t) => ({ id: t.id, name: t.name }))
+
+  while (pool.length < placeholderCount) {
+    const idx = pool.length + 1
+    const name = `Extra Van ${idx}${depotKey ? ` (${depotKey})` : ''}`
+    const created = await prisma.truck.create({
+      data: {
+        name,
+        capacity: extraVanCapacity,
+        type: 'Extra Van',
+        depot: depotKey,
+        active: true,
+      },
+    })
+    pool.push({ id: created.id, name: created.name })
+  }
+
+  let vanCursor = 0
+  return slots.map((s) => {
+    if (!s.isExtraVan) return s
+    const resolved = pool[vanCursor++]
+    return { ...s, truckId: resolved.id, truckName: resolved.name }
+  })
+}
 
 export async function POST(request: Request) {
   try {
@@ -18,7 +66,6 @@ export async function POST(request: Request) {
       return Response.json({ error: 'day and date are required' }, { status: 400 })
     }
 
-    // Fetch all pending geocoded orders
     const allPending = await prisma.order.findMany({
       where: { status: 'pending', lat: { not: null }, lng: { not: null } },
     })
@@ -40,11 +87,12 @@ export async function POST(request: Request) {
       )
     }
 
-    // Fetch trucks
     const trucks = await prisma.truck.findMany({
       where: {
         active: true,
         ...(truckIds && truckIds.length > 0 ? { id: { in: truckIds } } : {}),
+        // Exclude Extra Van pool from the "regular fleet" — they are provisioned on demand below.
+        NOT: { type: 'Extra Van' },
       },
     })
 
@@ -52,7 +100,6 @@ export async function POST(request: Request) {
       return Response.json({ error: 'No active trucks available.' }, { status: 400 })
     }
 
-    // Evaluate rules once across all orders
     const allRules = await prisma.rule.findMany({ where: { active: true } })
     const parsedRules = allRules.map(parseRule)
     const ordersForRules = orders.map((o) => ({
@@ -64,21 +111,17 @@ export async function POST(request: Request) {
     const routeWeightLimit = getRouteWeightLimit(parsedRules, ordersForRules)
     const minTruckLoadPct = getMinTruckLoadPct(parsedRules, ordersForRules)
 
-    // Determine depot groups to process.
-    // If a specific depot was requested, just one group.
-    // Otherwise split orders by their depot field so Andover orders never go to Plymouth trucks.
     const depotKeys: (string | null)[] = depot
       ? [depot]
       : [...new Set(orders.map((o) => o.depot ?? null))]
 
-    const createdRoutes: { routeId: string; routeName: string; stops: number }[] = []
+    const createdRoutes: { routeId: string; routeName: string; stops: number; isExtraVan: boolean; runNumber: number }[] = []
     const errors: string[] = []
+    const extraVansCreated: string[] = []
 
     for (const depotKey of depotKeys) {
-      // Orders for this depot group
       const depotOrders = depot ? orders : orders.filter((o) => (o.depot ?? null) === depotKey)
 
-      // Trucks for this depot group
       const depotTrucks = (truckIds && truckIds.length > 0)
         ? trucks
         : trucks.filter((t) => (t.depot ?? null) === depotKey)
@@ -88,7 +131,6 @@ export async function POST(request: Request) {
         continue
       }
 
-      // Look up depot coordinates
       let depotLocation = { lat: 51.5, lng: -1.8 }
       if (depotKey) {
         const depotRecord = await prisma.depot.findUnique({ where: { name: depotKey } })
@@ -98,8 +140,10 @@ export async function POST(request: Request) {
       }
 
       const trucksWithLimit = depotTrucks.map((t) => ({
-        ...t,
+        id: t.id,
+        name: t.name,
         capacity: routeWeightLimit !== null ? Math.min(t.capacity, routeWeightLimit) : t.capacity,
+        type: t.type ?? null,
       }))
 
       const stops = depotOrders.map((o) => ({
@@ -109,10 +153,36 @@ export async function POST(request: Request) {
         preferredTruckType: o.preferredTruckType ?? null,
       }))
 
-      const assignments = assignToTrucks(stops, trucksWithLimit, minTruckLoadPct)
+      const totalWeight = stops.reduce((s, st) => s + st.weight, 0)
+
+      const extraVanCapacity = routeWeightLimit !== null
+        ? Math.min(EXTRA_VAN_CAPACITY, routeWeightLimit)
+        : EXTRA_VAN_CAPACITY
+
+      const plannedSlots = planSlots(trucksWithLimit, totalWeight, { extraVanCapacity })
+
+      let slots: TruckSlot[]
+      try {
+        slots = await resolveExtraVans(plannedSlots, depotKey, extraVanCapacity)
+      } catch (err) {
+        errors.push(`Failed to provision Extra Vans for ${depotKey ?? 'unassigned'}: ${err instanceof Error ? err.message : String(err)}`)
+        continue
+      }
+
+      const vansInThisDepot = slots.filter((s) => s.isExtraVan)
+      for (const v of vansInThisDepot) {
+        if (!extraVansCreated.includes(v.truckName)) extraVansCreated.push(v.truckName)
+      }
+
+      let assignments
+      try {
+        assignments = assignToTrucks(stops, slots, minTruckLoadPct)
+      } catch (err) {
+        errors.push(`Could not produce feasible routes for ${depotKey ?? 'unassigned'}: ${err instanceof Error ? err.message : String(err)}`)
+        continue
+      }
 
       for (const assignment of assignments) {
-        const truck = depotTrucks.find((t) => t.id === assignment.truckId)!
         const orderedStops = await osrmTripOptimize(depotLocation, assignment.stops, optimizeStopOrder)
 
         let routeDetails = null
@@ -123,7 +193,13 @@ export async function POST(request: Request) {
           routeDetails = await getRouteDetails(origin, destination, waypoints)
         }
 
-        const routeName = `${truck.name} - ${day.charAt(0).toUpperCase() + day.slice(1)} ${date}`
+        const dayLabel = day.charAt(0).toUpperCase() + day.slice(1)
+        const runSuffix = assignment.isExtraVan
+          ? ''
+          : assignment.runNumber > 1
+            ? ` (Run ${assignment.runNumber})`
+            : ''
+        const routeName = `${assignment.truckName}${runSuffix} - ${dayLabel} ${date}`
 
         const route = await prisma.route.create({
           data: {
@@ -159,7 +235,13 @@ export async function POST(request: Request) {
           })
         })
 
-        createdRoutes.push({ routeId: route.id, routeName, stops: orderedStops.length })
+        createdRoutes.push({
+          routeId: route.id,
+          routeName,
+          stops: orderedStops.length,
+          isExtraVan: assignment.isExtraVan,
+          runNumber: assignment.runNumber,
+        })
       }
     }
 
@@ -172,6 +254,8 @@ export async function POST(request: Request) {
       total: createdRoutes.length,
       ordersRouted: orders.length,
       routeWeightLimitApplied: routeWeightLimit,
+      extraVansUsed: extraVansCreated.length,
+      doubleRuns: createdRoutes.filter((r) => !r.isExtraVan && r.runNumber > 1).length,
       warnings: errors.length > 0 ? errors : undefined,
     })
   } catch (err) {
@@ -182,3 +266,4 @@ export async function POST(request: Request) {
     )
   }
 }
+

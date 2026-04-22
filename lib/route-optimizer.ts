@@ -13,27 +13,109 @@ export interface Stop {
   preferredTruckType?: string | null
 }
 
+export interface TruckSlot {
+  truckId: string
+  truckName: string
+  capacity: number
+  type?: string | null
+  runNumber: number
+  isExtraVan: boolean
+}
+
 export interface TruckAssignment {
   truckId: string
   truckName: string
   capacity: number
+  runNumber: number
+  isExtraVan: boolean
   stops: Stop[]
   totalWeight: number
+}
+
+export const EXTRA_VAN_CAPACITY = 1500
+export const MAX_RUNS_PER_TRUCK = 2
+const EXTRA_VAN_PLACEHOLDER_PREFIX = '__extra_van_'
+
+export function isExtraVanPlaceholder(truckId: string): boolean {
+  return truckId.startsWith(EXTRA_VAN_PLACEHOLDER_PREFIX)
+}
+
+/**
+ * Build the list of truck "slots" (a slot = one route = one run of one truck).
+ * Adds double-runs to larger trucks first when weight exceeds single-run capacity,
+ * then falls back to placeholder Extra Van slots (1.5t each) for any remaining deficit.
+ * Placeholder IDs are resolved to real Truck records by the caller.
+ */
+export function planSlots(
+  trucks: { id: string; name: string; capacity: number; type?: string | null }[],
+  totalWeight: number,
+  opts: { extraVanCapacity?: number; maxRunsPerTruck?: number } = {}
+): TruckSlot[] {
+  const extraVanCapacity = opts.extraVanCapacity ?? EXTRA_VAN_CAPACITY
+  const maxRunsPerTruck = opts.maxRunsPerTruck ?? MAX_RUNS_PER_TRUCK
+
+  const sorted = [...trucks]
+    .filter((t) => t.capacity > 0)
+    .sort((a, b) => b.capacity - a.capacity)
+
+  const slots: TruckSlot[] = []
+  let cap = 0
+
+  for (const t of sorted) {
+    slots.push({
+      truckId: t.id,
+      truckName: t.name,
+      capacity: t.capacity,
+      type: t.type ?? null,
+      runNumber: 1,
+      isExtraVan: false,
+    })
+    cap += t.capacity
+  }
+
+  for (let run = 2; run <= maxRunsPerTruck && cap < totalWeight; run++) {
+    for (const t of sorted) {
+      if (cap >= totalWeight) break
+      slots.push({
+        truckId: t.id,
+        truckName: t.name,
+        capacity: t.capacity,
+        type: t.type ?? null,
+        runNumber: run,
+        isExtraVan: false,
+      })
+      cap += t.capacity
+    }
+  }
+
+  let vanIdx = 1
+  while (cap < totalWeight) {
+    slots.push({
+      truckId: `${EXTRA_VAN_PLACEHOLDER_PREFIX}${vanIdx}__`,
+      truckName: `Extra Van ${vanIdx}`,
+      capacity: extraVanCapacity,
+      type: 'Extra Van',
+      runNumber: 1,
+      isExtraVan: true,
+    })
+    cap += extraVanCapacity
+    vanIdx++
+  }
+
+  return slots
 }
 
 /**
  * K-means++ geographic clustering.
  * Groups stops into k clusters that minimise total intra-cluster distance,
- * so stops in the same area end up on the same truck.
+ * so stops in the same area end up on the same route.
  */
 function geographicCluster(stops: Stop[], k: number): Stop[][] {
   if (k <= 1) return [stops]
   if (stops.length <= k) return stops.map((s) => [s])
 
-  // K-means++ init: spread initial centres far apart to avoid poor local optima
   const centers: { lat: number; lng: number }[] = []
 
-  // First centre: stop closest to the overall centroid
   const centLat = stops.reduce((s, st) => s + st.lat, 0) / stops.length
   const centLng = stops.reduce((s, st) => s + st.lng, 0) / stops.length
   let minD = Infinity
@@ -44,7 +126,6 @@ function geographicCluster(stops: Stop[], k: number): Stop[][] {
   }
   centers.push({ lat: first.lat, lng: first.lng })
 
-  // Subsequent centres: pick stop with maximum min-distance to existing centres
   while (centers.length < k) {
     let maxMinDist = -1
     let best = stops[0]
@@ -55,7 +136,6 @@ function geographicCluster(stops: Stop[], k: number): Stop[][] {
     centers.push({ lat: best.lat, lng: best.lng })
   }
 
-  // K-means iterations (converges in < 30 for typical delivery data)
   let assignments = new Array<number>(stops.length).fill(0)
   for (let iter = 0; iter < 30; iter++) {
     const next = stops.map((stop) => {
@@ -72,7 +152,6 @@ function geographicCluster(stops: Stop[], k: number): Stop[][] {
     assignments = next
     if (converged) break
 
-    // Update centres to cluster centroids
     for (let i = 0; i < k; i++) {
       const cs = stops.filter((_, idx) => assignments[idx] === i)
       if (cs.length > 0) {
@@ -88,102 +167,140 @@ function geographicCluster(stops: Stop[], k: number): Stop[][] {
 }
 
 /**
- * Assign stops to trucks using geographic clustering to keep nearby deliveries together.
+ * Distance from a stop to the nearest actual stop in an assignment's current stops.
+ * Falls back to the assignment's centroid when it has no stops yet.
+ */
+function distanceToAssignment(stop: Stop, a: TruckAssignment): number {
+  if (a.stops.length === 0) return 0
+  let min = Infinity
+  for (const s of a.stops) {
+    const d = haversineDistance(stop.lat, stop.lng, s.lat, s.lng)
+    if (d < min) min = d
+  }
+  return min
+}
+
+function clusterCentroid(cluster: Stop[]): { lat: number; lng: number } {
+  if (cluster.length === 0) return { lat: 0, lng: 0 }
+  return {
+    lat: cluster.reduce((s, st) => s + st.lat, 0) / cluster.length,
+    lng: cluster.reduce((s, st) => s + st.lng, 0) / cluster.length,
+  }
+}
+
+/**
+ * Count how many stops in the cluster prefer the given truck type.
+ * Matches case-insensitively via substring.
+ */
+function preferredTypeScore(cluster: Stop[], slotType: string | null | undefined): number {
+  if (!slotType) return 0
+  const t = slotType.toLowerCase()
+  return cluster.filter((s) => s.preferredTruckType && t.includes(s.preferredTruckType.toLowerCase())).length
+}
+
+/**
+ * Assign stops to truck slots. One slot = one route.
  *
  * Algorithm:
- *  1. K-means cluster stops into k geographic groups (k = number of trucks)
- *  2. Assign heaviest cluster → highest-capacity truck
- *  3. Rebalance any over-capacity truck by moving stops that are closest to
- *     a neighbouring cluster into that cluster
+ *  1. K-means cluster stops into len(slots) geographic groups (respects geography for all stops).
+ *  2. Greedy cluster→slot matching: heaviest cluster first, prefer slots whose truck type matches
+ *     the cluster's majority preferredTruckType, then highest remaining capacity.
+ *  3. Rebalance any over-capacity slot by moving its stop that is closest (to the nearest stop
+ *     in another slot — not a far-away centroid) and still fits that slot's capacity.
+ *  4. Hard constraint: if no capacity-respecting move exists, throw. Caller must provision more
+ *     slots (via planSlots) rather than silently overloading.
  */
 export function assignToTrucks(
   stops: Stop[],
-  trucks: { id: string; name: string; capacity: number; type?: string | null }[],
+  slots: TruckSlot[],
   minLoadPct: number | null = null
 ): TruckAssignment[] {
-  const activeTrucks = trucks.filter((t) => t.capacity > 0)
-  if (activeTrucks.length === 0 || stops.length === 0) return []
+  if (slots.length === 0 || stops.length === 0) return []
 
-  // Truck consolidation: if a min-load rule applies, use the fewest trucks that
-  // would keep each truck above the threshold — avoids sending half-empty trucks.
-  let k = activeTrucks.length
+  let k = slots.length
   if (minLoadPct !== null && minLoadPct > 0) {
     const totalWeight = stops.reduce((s, st) => s + st.weight, 0)
-    const maxCapacity = Math.max(...activeTrucks.map((t) => t.capacity))
+    const maxCapacity = Math.max(...slots.map((s) => s.capacity))
     const effectiveCapacity = maxCapacity * (minLoadPct / 100)
-    const minTrucks = Math.ceil(totalWeight / effectiveCapacity)
-    k = Math.max(1, Math.min(activeTrucks.length, minTrucks))
+    const minSlots = Math.ceil(totalWeight / effectiveCapacity)
+    k = Math.max(1, Math.min(slots.length, minSlots))
   }
+
+  const activeSlots = slots.slice(0, k)
   const clusters = geographicCluster(stops, k)
 
-  // Match heaviest cluster to highest-capacity truck
-  const trucksSorted = [...activeTrucks].sort((a, b) => b.capacity - a.capacity)
-  const clustersSorted = [...clusters].sort(
-    (a, b) => b.reduce((s, st) => s + st.weight, 0) - a.reduce((s, st) => s + st.weight, 0)
-  )
-
-  const assignments: TruckAssignment[] = activeTrucks.map((t) => ({
-    truckId: t.id,
-    truckName: t.name,
-    capacity: t.capacity,
+  const assignments: TruckAssignment[] = activeSlots.map((s) => ({
+    truckId: s.truckId,
+    truckName: s.truckName,
+    capacity: s.capacity,
+    runNumber: s.runNumber,
+    isExtraVan: s.isExtraVan,
     stops: [],
     totalWeight: 0,
   }))
 
-  // Pre-assign stops that have a preferred truck type to a matching truck.
-  // Highest-priority (most specific) rule wins because applyRules only sets preferredTruckType
-  // if not already set, so the highest-priority matching rule sticks.
-  const forcedStopIds = new Set<string>()
-  for (const stop of stops) {
-    if (!stop.preferredTruckType) continue
-    const pref = stop.preferredTruckType.toLowerCase()
-    // Find matching trucks (type contains the preference string, case-insensitive)
-    const matching = activeTrucks.filter(
-      (t) => t.type && t.type.toLowerCase().includes(pref)
-    )
-    if (matching.length === 0) continue // no match — falls through to normal clustering
-    // Assign to the least-loaded matching truck that has remaining capacity
-    const target = matching
-      .map((t) => assignments.find((a) => a.truckId === t.id)!)
-      .sort((a, b) => a.totalWeight - b.totalWeight)
-      .find((a) => a.totalWeight + stop.weight <= a.capacity)
-      ?? assignments.find((a) => a.truckId === matching[0].id)! // fallback: first matching truck
-    target.stops.push(stop)
-    target.totalWeight += stop.weight
-    forcedStopIds.add(stop.id)
-  }
-
-  // Remove forced stops from the clusters so they aren't double-assigned
-  const remainingStops = stops.filter((s) => !forcedStopIds.has(s.id))
-
-  // Re-cluster only the remaining (unforced) stops
-  const remainingClusters = geographicCluster(remainingStops, Math.min(k, remainingStops.length || 1))
-  const remainingClustersSorted = [...remainingClusters].sort(
+  // Greedy cluster → slot assignment.
+  // Sort clusters by weight desc so heavy clusters pick first.
+  const clustersSorted = [...clusters].sort(
     (a, b) => b.reduce((s, st) => s + st.weight, 0) - a.reduce((s, st) => s + st.weight, 0)
   )
 
-  remainingClustersSorted.forEach((cluster, i) => {
-    if (i >= trucksSorted.length) return
-    const a = assignments.find((x) => x.truckId === trucksSorted[i].id)!
-    a.stops = [...a.stops, ...cluster]
-    a.totalWeight += cluster.reduce((s, st) => s + st.weight, 0)
-  })
+  const usedSlotIdx = new Set<number>()
+  for (const cluster of clustersSorted) {
+    if (cluster.length === 0) continue
+    const clusterWeight = cluster.reduce((s, st) => s + st.weight, 0)
+    const centroid = clusterCentroid(cluster)
 
-  // Rebalance: move stops from over-capacity trucks to the nearest under-capacity truck
+    // Pick the best available slot for this cluster. Score (higher = better):
+    //   + 1000 per stop whose preferredTruckType matches the slot type
+    //   + 100 if cluster fits within slot capacity
+    //   + (same-truck double-run bonus) 50 - distance_km_to_other_run_centroid, if the other run of
+    //       the same truck has already been assigned a cluster nearby
+    //   - capacity wasted (rough tie-breaker for packing)
+    let bestIdx = -1
+    let bestScore = -Infinity
+
+    for (let i = 0; i < activeSlots.length; i++) {
+      if (usedSlotIdx.has(i)) continue
+      const slot = activeSlots[i]
+      let score = 0
+      score += preferredTypeScore(cluster, slot.type) * 1000
+      if (clusterWeight <= slot.capacity) score += 100
+      // Double-run affinity: if same truck has another run already with a cluster assigned, prefer
+      // putting this cluster near it — that keeps both runs in the same area.
+      for (let j = 0; j < activeSlots.length; j++) {
+        if (j === i) continue
+        if (!usedSlotIdx.has(j)) continue
+        if (activeSlots[j].truckId !== slot.truckId) continue
+        if (activeSlots[j].isExtraVan) continue
+        const otherCentroid = clusterCentroid(assignments[j].stops)
+        const dKm = haversineDistance(centroid.lat, centroid.lng, otherCentroid.lat, otherCentroid.lng)
+        score += Math.max(0, 50 - dKm)
+      }
+      score -= Math.abs(slot.capacity - clusterWeight) / 1000
+      if (score > bestScore) { bestScore = score; bestIdx = i }
+    }
+
+    if (bestIdx === -1) bestIdx = activeSlots.findIndex((_, i) => !usedSlotIdx.has(i))
+    if (bestIdx === -1) break
+
+    usedSlotIdx.add(bestIdx)
+    assignments[bestIdx].stops = [...cluster]
+    assignments[bestIdx].totalWeight = clusterWeight
+  }
+
+  // Rebalance over-capacity assignments. Hard constraint: every move must respect capacity.
   let changed = true
   let iters = 0
-  while (changed && iters < 200) {
+  while (changed && iters < 500) {
     changed = false
     iters++
 
     for (const over of assignments) {
       if (over.totalWeight <= over.capacity) continue
+      const under = assignments.filter((a) => a !== over)
+      if (under.length === 0) break
 
-      const under = assignments.filter((a) => a.truckId !== over.truckId)
-      if (under.length === 0) continue
-
-      // Find the stop in the overloaded truck that is geographically closest to
-      // another truck's cluster and will fit within that truck's remaining capacity
       let bestStop: Stop | null = null
       let bestTarget: TruckAssignment | null = null
       let bestDist = Infinity
@@ -191,13 +308,7 @@ export function assignToTrucks(
       for (const stop of over.stops) {
         for (const target of under) {
           if (target.totalWeight + stop.weight > target.capacity) continue
-          const tLat = target.stops.length > 0
-            ? target.stops.reduce((s, st) => s + st.lat, 0) / target.stops.length
-            : stop.lat
-          const tLng = target.stops.length > 0
-            ? target.stops.reduce((s, st) => s + st.lng, 0) / target.stops.length
-            : stop.lng
-          const dist = haversineDistance(stop.lat, stop.lng, tLat, tLng)
+          const dist = distanceToAssignment(stop, target)
           if (dist < bestDist) { bestDist = dist; bestStop = stop; bestTarget = target }
         }
       }
@@ -208,18 +319,15 @@ export function assignToTrucks(
         bestTarget.stops.push(bestStop)
         bestTarget.totalWeight += bestStop.weight
         changed = true
-        break // restart after each move
-      } else {
-        // No capacity-respecting move available — move the lightest stop to the least-loaded truck
-        const lightest = over.stops.reduce((a, b) => a.weight <= b.weight ? a : b)
-        const leastLoaded = under.reduce((a, b) => a.totalWeight <= b.totalWeight ? a : b)
-        over.stops = over.stops.filter((s) => s.id !== lightest.id)
-        over.totalWeight -= lightest.weight
-        leastLoaded.stops.push(lightest)
-        leastLoaded.totalWeight += lightest.weight
-        changed = true
         break
       }
+
+      // No capacity-respecting move exists. Caller must provision more slots.
+      throw new Error(
+        `Cannot fit ${over.stops.length} stops (${over.totalWeight.toFixed(0)}kg) ` +
+        `into ${over.truckName} (Run ${over.runNumber}, cap ${over.capacity}kg). ` +
+        `Add another truck or increase Extra Van capacity.`
+      )
     }
   }
 
@@ -246,7 +354,6 @@ export function optimizeStopOrder(
     return d
   }
 
-  // Brute force: try every permutation and keep the shortest
   if (stops.length <= 10) {
     let bestRoute = stops
     let bestDist = routeDist(stops)
@@ -267,7 +374,6 @@ export function optimizeStopOrder(
     return bestRoute
   }
 
-  // Nearest-neighbour for larger routes, then 2-opt improvement
   const unvisited = [...stops]
   const route: Stop[] = []
   let current: { lat: number; lng: number } = depot
@@ -284,7 +390,6 @@ export function optimizeStopOrder(
     unvisited.splice(nearestIdx, 1)
   }
 
-  // 2-opt: repeatedly reverse segments to eliminate crossing edges
   let best = route
   let improved = true
   while (improved) {
