@@ -134,7 +134,39 @@ export default function OrdersPage() {
 
   const handleDelete = async (ids: string[]) => {
     if (!confirm(`Delete ${ids.length} order(s)?`)) return
-    await fetch(`/api/orders?ids=${ids.join(',')}`, { method: 'DELETE' })
+    const res = await fetch(`/api/orders?ids=${ids.join(',')}`, { method: 'DELETE' })
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) {
+      alert(`Delete failed: ${data.error ?? 'Unknown error'}`)
+      return
+    }
+    setSelected(new Set())
+    fetchOrders()
+  }
+
+  const handleDeleteAllFiltered = async () => {
+    const filterDesc = [
+      statusFilter && `status=${statusFilter}`,
+      dayFilter && `day=${dayFilter}`,
+      depotFilter && `depot=${depotFilter}`,
+      search && `search="${search}"`,
+    ].filter(Boolean).join(', ')
+    const scope = filterDesc ? `all ${total} matching (${filterDesc})` : `ALL ${total} orders`
+    if (!confirm(`Delete ${scope}? This will also remove their route stops and empty routes. This cannot be undone.`)) return
+
+    const params = new URLSearchParams()
+    if (statusFilter) params.set('status', statusFilter)
+    if (dayFilter) params.set('day', dayFilter)
+    if (depotFilter) params.set('depot', depotFilter)
+    if (search) params.set('search', search)
+    if (!statusFilter && !dayFilter && !depotFilter && !search) params.set('all', 'true')
+
+    const res = await fetch(`/api/orders?${params}`, { method: 'DELETE' })
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) {
+      alert(`Delete failed: ${data.error ?? 'Unknown error'}`)
+      return
+    }
     setSelected(new Set())
     fetchOrders()
   }
@@ -192,6 +224,11 @@ export default function OrdersPage() {
             {selected.size > 0 && (
               <Button variant="danger" size="sm" onClick={() => handleDelete([...selected])}>
                 <Trash2 size={14} /> Delete ({selected.size})
+              </Button>
+            )}
+            {total > 0 && (
+              <Button variant="danger" size="sm" onClick={handleDeleteAllFiltered}>
+                <Trash2 size={14} /> Delete All{statusFilter || dayFilter || depotFilter || search ? ' Filtered' : ''} ({total})
               </Button>
             )}
             <Button size="sm" onClick={() => setImportModal(true)}>

@@ -61,8 +61,65 @@ export async function PATCH(request: Request) {
 
 export async function DELETE(request: Request) {
   const { searchParams } = new URL(request.url)
-  const ids = searchParams.get('ids')?.split(',') ?? []
-  if (ids.length === 0) return Response.json({ error: 'No IDs provided' }, { status: 400 })
-  await prisma.order.deleteMany({ where: { id: { in: ids } } })
-  return Response.json({ deleted: ids.length })
+  const idsParam = searchParams.get('ids')
+  const all = searchParams.get('all') === 'true'
+  const status = searchParams.get('status')
+  const day = searchParams.get('day')
+  const depot = searchParams.get('depot')
+  const search = searchParams.get('search') ?? ''
+
+  let where: Record<string, unknown>
+  if (idsParam) {
+    const ids = idsParam.split(',').filter(Boolean)
+    if (ids.length === 0) return Response.json({ error: 'No IDs provided' }, { status: 400 })
+    where = { id: { in: ids } }
+  } else if (all || status || day || depot || search) {
+    where = {
+      ...(status ? { status } : {}),
+      ...(day ? { scheduledDay: day } : {}),
+      ...(depot ? { depot } : {}),
+      ...(search
+        ? {
+            OR: [
+              { customer: { contains: search } },
+              { postcode: { contains: search } },
+              { reference: { contains: search } },
+              { area: { contains: search } },
+            ],
+          }
+        : {}),
+    }
+  } else {
+    return Response.json(
+      { error: 'Specify either ids, a filter (status/day/depot/search), or all=true' },
+      { status: 400 }
+    )
+  }
+
+  try {
+    const result = await prisma.$transaction(async (tx) => {
+      // RouteStop.orderId has no ON DELETE CASCADE, so remove dependent stops first.
+      const targets = await tx.order.findMany({ where, select: { id: true } })
+      const targetIds = targets.map((t) => t.id)
+      if (targetIds.length === 0) return { deleted: 0, routeStopsDeleted: 0 }
+
+      const stops = await tx.routeStop.deleteMany({ where: { orderId: { in: targetIds } } })
+      const orders = await tx.order.deleteMany({ where: { id: { in: targetIds } } })
+
+      // Clean up now-empty routes so the UI doesn't carry stale shells.
+      await tx.route.deleteMany({
+        where: { stops: { none: {} } },
+      })
+
+      return { deleted: orders.count, routeStopsDeleted: stops.count }
+    })
+
+    return Response.json(result)
+  } catch (err) {
+    console.error('[Orders DELETE] failed:', err)
+    return Response.json(
+      { error: err instanceof Error ? err.message : String(err) },
+      { status: 500 }
+    )
+  }
 }
