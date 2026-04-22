@@ -49,10 +49,15 @@ export function isExtraVanPlaceholder(truckId: string): boolean {
 export function planSlots(
   trucks: { id: string; name: string; capacity: number; type?: string | null }[],
   totalWeight: number,
-  opts: { extraVanCapacity?: number; maxRunsPerTruck?: number } = {}
+  opts: {
+    extraVanCapacity?: number
+    maxRunsPerTruck?: number
+    noDoubleRunTruckIds?: Set<string>
+  } = {}
 ): TruckSlot[] {
   const extraVanCapacity = opts.extraVanCapacity ?? EXTRA_VAN_CAPACITY
   const maxRunsPerTruck = opts.maxRunsPerTruck ?? MAX_RUNS_PER_TRUCK
+  const noDoubleRun = opts.noDoubleRunTruckIds ?? new Set<string>()
 
   const sorted = [...trucks]
     .filter((t) => t.capacity > 0)
@@ -76,6 +81,7 @@ export function planSlots(
   for (let run = 2; run <= maxRunsPerTruck && cap < totalWeight; run++) {
     for (const t of sorted) {
       if (cap >= totalWeight) break
+      if (noDoubleRun.has(t.id)) continue
       slots.push({
         truckId: t.id,
         truckName: t.name,

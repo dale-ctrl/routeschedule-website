@@ -5,9 +5,14 @@ import {
   planSlots,
   EXTRA_VAN_CAPACITY,
   type TruckSlot,
+  type TruckAssignment,
+  type Stop,
 } from '@/lib/route-optimizer'
-import { getRouteDetails, osrmTripOptimize } from '@/lib/routing'
+import { getRouteDetails, osrmTripOptimize, type RouteResult } from '@/lib/routing'
 import { parseRule, getRouteWeightLimit, getMinTruckLoadPct } from '@/lib/rules-engine'
+
+/** Max on-road time per truck per day (minutes). Door-to-door: depot → stops → depot. */
+const DRIVER_DAY_LIMIT_MIN = 240
 
 /**
  * Find or create real Truck DB rows to back any Extra Van placeholder slots.
@@ -159,40 +164,91 @@ export async function POST(request: Request) {
         ? Math.min(EXTRA_VAN_CAPACITY, routeWeightLimit)
         : EXTRA_VAN_CAPACITY
 
-      const plannedSlots = planSlots(trucksWithLimit, totalWeight, { extraVanCapacity })
-
-      let slots: TruckSlot[]
-      try {
-        slots = await resolveExtraVans(plannedSlots, depotKey, extraVanCapacity)
-      } catch (err) {
-        errors.push(`Failed to provision Extra Vans for ${depotKey ?? 'unassigned'}: ${err instanceof Error ? err.message : String(err)}`)
-        continue
+      // Plan → assign → OSRM → 4h check → replan (prohibit double-runs on trucks that
+      // exceeded the limit). Repeat until every truck fits within the driver day, or we
+      // run out of double-run options. The replan uses planSlots again which will
+      // automatically insert enough correctly-sized Extra Vans to absorb the overflow.
+      type Candidate = {
+        assignment: TruckAssignment
+        orderedStops: Stop[]
+        routeDetails: RouteResult | null
       }
 
-      const vansInThisDepot = slots.filter((s) => s.isExtraVan)
-      for (const v of vansInThisDepot) {
-        if (!extraVansCreated.includes(v.truckName)) extraVansCreated.push(v.truckName)
-      }
+      const noDoubleRunTruckIds = new Set<string>()
+      let candidates: Candidate[] = []
+      let attempts = 0
+      const MAX_ATTEMPTS = 4
 
-      let assignments
-      try {
-        assignments = assignToTrucks(stops, slots, minTruckLoadPct)
-      } catch (err) {
-        errors.push(`Could not produce feasible routes for ${depotKey ?? 'unassigned'}: ${err instanceof Error ? err.message : String(err)}`)
-        continue
-      }
+      while (attempts < MAX_ATTEMPTS) {
+        attempts++
+        const plannedSlotsThisPass = planSlots(trucksWithLimit, totalWeight, {
+          extraVanCapacity,
+          noDoubleRunTruckIds,
+        })
 
-      for (const assignment of assignments) {
-        const orderedStops = await osrmTripOptimize(depotLocation, assignment.stops, optimizeStopOrder)
-
-        let routeDetails = null
-        if (orderedStops.length > 0) {
-          const origin = depotLocation
-          const destination = orderedStops[orderedStops.length - 1]
-          const waypoints = orderedStops.slice(0, -1)
-          routeDetails = await getRouteDetails(origin, destination, waypoints)
+        let slotsThisPass: TruckSlot[]
+        try {
+          slotsThisPass = await resolveExtraVans(plannedSlotsThisPass, depotKey, extraVanCapacity)
+        } catch (err) {
+          errors.push(`Failed to provision Extra Vans for ${depotKey ?? 'unassigned'}: ${err instanceof Error ? err.message : String(err)}`)
+          break
         }
 
+        let assignments: TruckAssignment[]
+        try {
+          assignments = assignToTrucks(stops, slotsThisPass, minTruckLoadPct)
+        } catch (err) {
+          errors.push(`Could not produce feasible routes for ${depotKey ?? 'unassigned'}: ${err instanceof Error ? err.message : String(err)}`)
+          candidates = []
+          break
+        }
+
+        for (const s of slotsThisPass) {
+          if (s.isExtraVan && !extraVansCreated.includes(s.truckName)) extraVansCreated.push(s.truckName)
+        }
+
+        candidates = []
+        for (const assignment of assignments) {
+          const orderedStops = await osrmTripOptimize(depotLocation, assignment.stops, optimizeStopOrder)
+          let routeDetails: RouteResult | null = null
+          if (orderedStops.length > 0) {
+            routeDetails = await getRouteDetails(depotLocation, depotLocation, orderedStops)
+          }
+          candidates.push({ assignment, orderedStops, routeDetails })
+        }
+
+        // Group non-extra-van runs by truck and find any truck whose door-to-door total
+        // exceeds the driver-day limit. Prohibit those trucks from getting a Run 2 next pass.
+        const byTruck = new Map<string, Candidate[]>()
+        for (const c of candidates) {
+          if (c.assignment.isExtraVan) continue
+          const arr = byTruck.get(c.assignment.truckId) ?? []
+          arr.push(c)
+          byTruck.set(c.assignment.truckId, arr)
+        }
+
+        const newlyProhibited: string[] = []
+        for (const [truckId, runs] of byTruck) {
+          if (runs.length <= 1) continue
+          const total = runs.reduce((s, c) => s + (c.routeDetails?.totalDuration ?? 0), 0)
+          if (total > DRIVER_DAY_LIMIT_MIN && !noDoubleRunTruckIds.has(truckId)) {
+            newlyProhibited.push(truckId)
+          }
+        }
+
+        if (newlyProhibited.length === 0) break
+        newlyProhibited.forEach((id) => noDoubleRunTruckIds.add(id))
+        if (attempts === MAX_ATTEMPTS) {
+          errors.push(
+            `${depotKey ?? 'unassigned'}: driver-day limit (${DRIVER_DAY_LIMIT_MIN} min) could not be satisfied after ${MAX_ATTEMPTS} attempts — some trucks may still be over.`
+          )
+        }
+      }
+
+      if (candidates.length === 0) continue
+
+      // Phase 3: persist routes + stops.
+      for (const { assignment, orderedStops, routeDetails } of candidates) {
         const dayLabel = day.charAt(0).toUpperCase() + day.slice(1)
         const runSuffix = assignment.isExtraVan
           ? ''
