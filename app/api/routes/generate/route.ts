@@ -3,6 +3,7 @@ import {
   assignToTrucks,
   optimizeStopOrder,
   planSlots,
+  isLondonPostcode,
   EXTRA_VAN_CAPACITY,
   type TruckSlot,
   type TruckAssignment,
@@ -164,6 +165,17 @@ export async function POST(request: Request) {
         ? Math.min(EXTRA_VAN_CAPACITY, routeWeightLimit)
         : EXTRA_VAN_CAPACITY
 
+      // Always provision at least enough vans to carry this depot's London weight.
+      // Trucks struggle in LEZ/ULEZ/narrow-street zones, so London work should go on
+      // vans whenever possible — freed truck capacity absorbs the non-London stops.
+      const londonWeight = stops
+        .filter((s) => isLondonPostcode(s.postcode))
+        .reduce((sum, s) => sum + s.weight, 0)
+      const londonStopCount = stops.filter((s) => isLondonPostcode(s.postcode)).length
+      const minExtraVans = londonStopCount > 0
+        ? Math.max(1, Math.ceil(londonWeight / extraVanCapacity))
+        : 0
+
       // Plan → assign → OSRM → 4h check → replan (prohibit double-runs on trucks that
       // exceeded the limit). Repeat until every truck fits within the driver day, or we
       // run out of double-run options. The replan uses planSlots again which will
@@ -188,6 +200,7 @@ export async function POST(request: Request) {
           extraVanCapacity,
           noDoubleRunTruckIds,
           bonusVans,
+          minExtraVans,
         })
 
         let slotsThisPass: TruckSlot[]

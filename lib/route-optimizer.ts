@@ -54,12 +54,14 @@ export function planSlots(
     maxRunsPerTruck?: number
     noDoubleRunTruckIds?: Set<string>
     bonusVans?: number
+    minExtraVans?: number
   } = {}
 ): TruckSlot[] {
   const extraVanCapacity = opts.extraVanCapacity ?? EXTRA_VAN_CAPACITY
   const maxRunsPerTruck = opts.maxRunsPerTruck ?? MAX_RUNS_PER_TRUCK
   const noDoubleRun = opts.noDoubleRunTruckIds ?? new Set<string>()
   const bonusVans = Math.max(0, opts.bonusVans ?? 0)
+  const minExtraVans = Math.max(0, opts.minExtraVans ?? 0)
 
   const sorted = [...trucks]
     .filter((t) => t.capacity > 0)
@@ -98,7 +100,7 @@ export function planSlots(
 
   let vanIdx = 1
   const targetCap = totalWeight + bonusVans * extraVanCapacity
-  while (cap < targetCap) {
+  while (cap < targetCap || vanIdx - 1 < minExtraVans) {
     slots.push({
       truckId: `${EXTRA_VAN_PLACEHOLDER_PREFIX}${vanIdx}__`,
       truckName: `Extra Van ${vanIdx}`,
@@ -320,17 +322,23 @@ export function assignToTrucks(
 ): TruckAssignment[] {
   if (slots.length === 0 || stops.length === 0) return []
 
-  let k = slots.length
-  if (minLoadPct !== null && minLoadPct > 0) {
+  // Min-load consolidation only reduces truck slots — van slots (which are
+  // explicitly provisioned for things like London work) must not be dropped here
+  // or the reason they were created is lost.
+  const truckSlots = slots.filter((s) => !s.isExtraVan)
+  const vanSlots = slots.filter((s) => s.isExtraVan)
+  let truckCount = truckSlots.length
+  if (minLoadPct !== null && minLoadPct > 0 && truckSlots.length > 0) {
     const totalWeight = stops.reduce((s, st) => s + st.weight, 0)
-    const maxCapacity = Math.max(...slots.map((s) => s.capacity))
-    const effectiveCapacity = maxCapacity * (minLoadPct / 100)
-    const minSlots = Math.ceil(totalWeight / effectiveCapacity)
-    k = Math.max(1, Math.min(slots.length, minSlots))
+    const maxTruckCapacity = Math.max(...truckSlots.map((s) => s.capacity))
+    const vanWeightCovered = vanSlots.reduce((s, v) => s + v.capacity, 0)
+    const truckWeightToCover = Math.max(0, totalWeight - vanWeightCovered)
+    const effectiveCapacity = maxTruckCapacity * (minLoadPct / 100)
+    const minTrucks = Math.ceil(truckWeightToCover / effectiveCapacity)
+    truckCount = Math.max(1, Math.min(truckSlots.length, minTrucks))
   }
-
-  const activeSlots = slots.slice(0, k)
-  const clusters = geographicCluster(stops, k)
+  const activeSlots = [...truckSlots.slice(0, truckCount), ...vanSlots]
+  const clusters = geographicCluster(stops, activeSlots.length)
 
   const assignments: TruckAssignment[] = activeSlots.map((s) => ({
     truckId: s.truckId,
