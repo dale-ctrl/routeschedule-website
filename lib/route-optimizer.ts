@@ -105,39 +105,83 @@ export function planSlots(
   return slots
 }
 
-/**
- * K-means++ geographic clustering.
- * Groups stops into k clusters that minimise total intra-cluster distance,
- * so stops in the same area end up on the same route.
- */
-function geographicCluster(stops: Stop[], k: number): Stop[][] {
-  if (k <= 1) return [stops]
-  if (stops.length <= k) return stops.map((s) => [s])
+/** Seeded PRNG — deterministic restarts so regenerations are reproducible. */
+function mulberry32(seed: number) {
+  return function () {
+    seed = (seed + 0x6d2b79f5) | 0
+    let t = seed
+    t = Math.imul(t ^ (t >>> 15), t | 1)
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61)
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+  }
+}
 
+/** Within-cluster sum of squared distances — lower = tighter clusters. */
+function wcss(clusters: Stop[][]): number {
+  let total = 0
+  for (const cluster of clusters) {
+    if (cluster.length === 0) continue
+    const cLat = cluster.reduce((s, st) => s + st.lat, 0) / cluster.length
+    const cLng = cluster.reduce((s, st) => s + st.lng, 0) / cluster.length
+    for (const stop of cluster) {
+      const d = haversineDistance(stop.lat, stop.lng, cLat, cLng)
+      total += d * d
+    }
+  }
+  return total
+}
+
+function runKMeansOnce(stops: Stop[], k: number, seed: number): Stop[][] {
+  const rng = mulberry32(seed * 9973 + 1)
   const centers: { lat: number; lng: number }[] = []
 
-  const centLat = stops.reduce((s, st) => s + st.lat, 0) / stops.length
-  const centLng = stops.reduce((s, st) => s + st.lng, 0) / stops.length
-  let minD = Infinity
-  let first = stops[0]
-  for (const stop of stops) {
-    const d = haversineDistance(stop.lat, stop.lng, centLat, centLng)
-    if (d < minD) { minD = d; first = stop }
-  }
-  centers.push({ lat: first.lat, lng: first.lng })
-
-  while (centers.length < k) {
-    let maxMinDist = -1
-    let best = stops[0]
+  if (seed === 0) {
+    // Attempt 0: deterministic max-min k-means++ init (good baseline).
+    const centLat = stops.reduce((s, st) => s + st.lat, 0) / stops.length
+    const centLng = stops.reduce((s, st) => s + st.lng, 0) / stops.length
+    let minD = Infinity
+    let first = stops[0]
     for (const stop of stops) {
-      const d = Math.min(...centers.map((c) => haversineDistance(stop.lat, stop.lng, c.lat, c.lng)))
-      if (d > maxMinDist) { maxMinDist = d; best = stop }
+      const d = haversineDistance(stop.lat, stop.lng, centLat, centLng)
+      if (d < minD) { minD = d; first = stop }
     }
-    centers.push({ lat: best.lat, lng: best.lng })
+    centers.push({ lat: first.lat, lng: first.lng })
+    while (centers.length < k) {
+      let maxMinDist = -1
+      let best = stops[0]
+      for (const stop of stops) {
+        const d = Math.min(...centers.map((c) => haversineDistance(stop.lat, stop.lng, c.lat, c.lng)))
+        if (d > maxMinDist) { maxMinDist = d; best = stop }
+      }
+      centers.push({ lat: best.lat, lng: best.lng })
+    }
+  } else {
+    // Attempts 1..N: probabilistic k-means++ (D² weighted) to explore other partitions.
+    const firstIdx = Math.floor(rng() * stops.length)
+    centers.push({ lat: stops[firstIdx].lat, lng: stops[firstIdx].lng })
+    while (centers.length < k) {
+      const distSq = stops.map((stop) => {
+        const d = Math.min(...centers.map((c) => haversineDistance(stop.lat, stop.lng, c.lat, c.lng)))
+        return d * d
+      })
+      const total = distSq.reduce((a, b) => a + b, 0)
+      if (total === 0) {
+        const idx = Math.floor(rng() * stops.length)
+        centers.push({ lat: stops[idx].lat, lng: stops[idx].lng })
+        continue
+      }
+      let r = rng() * total
+      let pick = stops[0]
+      for (let i = 0; i < stops.length; i++) {
+        r -= distSq[i]
+        if (r <= 0) { pick = stops[i]; break }
+      }
+      centers.push({ lat: pick.lat, lng: pick.lng })
+    }
   }
 
   let assignments = new Array<number>(stops.length).fill(0)
-  for (let iter = 0; iter < 30; iter++) {
+  for (let iter = 0; iter < 50; iter++) {
     const next = stops.map((stop) => {
       let nearest = 0
       let nearestDist = Infinity
@@ -147,11 +191,9 @@ function geographicCluster(stops: Stop[], k: number): Stop[][] {
       })
       return nearest
     })
-
     const converged = next.every((a, i) => a === assignments[i])
     assignments = next
     if (converged) break
-
     for (let i = 0; i < k; i++) {
       const cs = stops.filter((_, idx) => assignments[idx] === i)
       if (cs.length > 0) {
@@ -164,6 +206,32 @@ function geographicCluster(stops: Stop[], k: number): Stop[][] {
   }
 
   return Array.from({ length: k }, (_, i) => stops.filter((_, idx) => assignments[idx] === i))
+}
+
+/**
+ * Multi-start k-means geographic clustering.
+ * K-means gets stuck in local minima with elongated data (e.g. long strings of stops
+ * spanning Salisbury → Surrey): a bad initialisation can produce diagonal/zigzagging
+ * clusters instead of the obvious compact regional groups. We run k-means many times
+ * from different seeds (first deterministic, rest D²-weighted k-means++) and keep the
+ * partition with the lowest within-cluster sum of squares — i.e. the tightest one.
+ */
+function geographicCluster(stops: Stop[], k: number): Stop[][] {
+  if (k <= 1) return [stops]
+  if (stops.length <= k) return stops.map((s) => [s])
+
+  const RESTARTS = 40
+  let best = runKMeansOnce(stops, k, 0)
+  let bestScore = wcss(best)
+  for (let seed = 1; seed < RESTARTS; seed++) {
+    const candidate = runKMeansOnce(stops, k, seed)
+    const score = wcss(candidate)
+    if (score < bestScore) {
+      bestScore = score
+      best = candidate
+    }
+  }
+  return best
 }
 
 /**
