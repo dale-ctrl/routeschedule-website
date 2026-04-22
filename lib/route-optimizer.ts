@@ -454,41 +454,41 @@ function refineByProximity(assignments: TruckAssignment[]): void {
       }
     }
 
-    // Pass 2: swaps. A stop can want to switch clusters but be blocked because the
-    // target is at capacity — common when a heavy truck visits a stop that would
-    // sit much better on a lighter neighbouring cluster. A swap gets both stops
-    // where they want to go without breaking either capacity. Only accepts swaps
-    // where BOTH stops individually prefer the other cluster — otherwise we'd
-    // trade one bad placement for another.
+    // Pass 2: swaps. Classic 2-opt: for every pair of stops in different clusters,
+    // swap them if the total nearest-neighbour distance strictly decreases and both
+    // capacities remain intact. This fixes geographic outliers that direct moves
+    // can't reach because the target cluster is at capacity — the partner stop
+    // doesn't need to individually want to move, it just needs to be a "fair trade"
+    // that leaves both clusters tighter overall.
+    const SWAP_IMPROVEMENT_KM = 1
     for (const a of assignments) {
       for (const b of assignments) {
         if (a === b) continue
         for (const sa of [...a.stops]) {
-          if (!a.stops.some((s) => s.id === sa.id)) continue // already swapped out this iter
+          if (!a.stops.some((s) => s.id === sa.id)) continue
+          let bestPartner: Stop | null = null
+          let bestGain = SWAP_IMPROVEMENT_KM
           const saHere = nearestOtherStopDistance(sa, a)
           const saThere = distanceToAssignment(sa, b)
-          if (saThere >= saHere) continue
-
-          let partner: Stop | null = null
-          let partnerThere = Infinity
           for (const sb of b.stops) {
             const sbHere = nearestOtherStopDistance(sb, b)
             const sbThere = distanceToAssignment(sb, a)
-            if (sbThere >= sbHere) continue
-            if (sbThere < partnerThere) { partnerThere = sbThere; partner = sb }
+            const gain = (saHere + sbHere) - (saThere + sbThere)
+            if (gain <= bestGain) continue
+            const aAfter = a.totalWeight - sa.weight + sb.weight
+            const bAfter = b.totalWeight - sb.weight + sa.weight
+            if (aAfter > a.capacity || bAfter > b.capacity) continue
+            bestGain = gain
+            bestPartner = sb
           }
-          if (!partner) continue
-
-          const aAfter = a.totalWeight - sa.weight + partner.weight
-          const bAfter = b.totalWeight - partner.weight + sa.weight
-          if (aAfter > a.capacity || bAfter > b.capacity) continue
+          if (!bestPartner) continue
 
           a.stops = a.stops.filter((s) => s.id !== sa.id)
-          b.stops = b.stops.filter((s) => s.id !== partner!.id)
-          a.stops.push(partner)
+          b.stops = b.stops.filter((s) => s.id !== bestPartner!.id)
+          a.stops.push(bestPartner)
           b.stops.push(sa)
-          a.totalWeight = aAfter
-          b.totalWeight = bAfter
+          a.totalWeight = a.totalWeight - sa.weight + bestPartner.weight
+          b.totalWeight = b.totalWeight - bestPartner.weight + sa.weight
           improved = true
         }
       }
