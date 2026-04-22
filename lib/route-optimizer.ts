@@ -423,10 +423,13 @@ export function assignToTrucks(
 function refineByProximity(assignments: TruckAssignment[]): void {
   let improved = true
   let iters = 0
-  while (improved && iters < 50) {
+  while (improved && iters < 100) {
     improved = false
     iters++
 
+    // Pass 1: direct moves. For each stop, migrate to the nearest cluster that has
+    // capacity headroom for it, provided the target's nearest-neighbour is closer
+    // than the stop's current home's nearest-neighbour.
     for (const home of assignments) {
       if (home.stops.length <= 1) continue
       for (const stop of [...home.stops]) {
@@ -446,6 +449,46 @@ function refineByProximity(assignments: TruckAssignment[]): void {
           home.totalWeight -= stop.weight
           bestTarget.stops.push(stop)
           bestTarget.totalWeight += stop.weight
+          improved = true
+        }
+      }
+    }
+
+    // Pass 2: swaps. A stop can want to switch clusters but be blocked because the
+    // target is at capacity — common when a heavy truck visits a stop that would
+    // sit much better on a lighter neighbouring cluster. A swap gets both stops
+    // where they want to go without breaking either capacity. Only accepts swaps
+    // where BOTH stops individually prefer the other cluster — otherwise we'd
+    // trade one bad placement for another.
+    for (const a of assignments) {
+      for (const b of assignments) {
+        if (a === b) continue
+        for (const sa of [...a.stops]) {
+          if (!a.stops.some((s) => s.id === sa.id)) continue // already swapped out this iter
+          const saHere = nearestOtherStopDistance(sa, a)
+          const saThere = distanceToAssignment(sa, b)
+          if (saThere >= saHere) continue
+
+          let partner: Stop | null = null
+          let partnerThere = Infinity
+          for (const sb of b.stops) {
+            const sbHere = nearestOtherStopDistance(sb, b)
+            const sbThere = distanceToAssignment(sb, a)
+            if (sbThere >= sbHere) continue
+            if (sbThere < partnerThere) { partnerThere = sbThere; partner = sb }
+          }
+          if (!partner) continue
+
+          const aAfter = a.totalWeight - sa.weight + partner.weight
+          const bAfter = b.totalWeight - partner.weight + sa.weight
+          if (aAfter > a.capacity || bAfter > b.capacity) continue
+
+          a.stops = a.stops.filter((s) => s.id !== sa.id)
+          b.stops = b.stops.filter((s) => s.id !== partner!.id)
+          a.stops.push(partner)
+          b.stops.push(sa)
+          a.totalWeight = aAfter
+          b.totalWeight = bAfter
           improved = true
         }
       }
