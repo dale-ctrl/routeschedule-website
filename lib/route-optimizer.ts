@@ -438,9 +438,18 @@ export function assignToTrucks(
     let bestFittingScore = -Infinity
     for (let i = 0; i < activeSlots.length; i++) {
       if (usedSlotIdx.has(i)) continue
+      const slot = activeSlots[i]
       const s = scoreSlot(i)
       if (s > bestScore) { bestScore = s; bestIdx = i }
-      if (clusterWeight <= activeSlots[i].capacity && s > bestFittingScore) {
+      // Vans may provisionally accept a London-heavy cluster that's up to 30% over
+      // their 1.5t capacity — the rebalance loop will push the lightest London
+      // stop(s) off onto the nearest truck cluster, enforcing the hard 1.5t limit
+      // in the final output. Without this slack, a pre-split London cluster at
+      // ~1.85t fails the "fits" test, skips the van, and lands on a truck entirely.
+      const fits =
+        clusterWeight <= slot.capacity ||
+        (slot.isExtraVan && londonStops > 0 && clusterWeight <= slot.capacity * 1.3)
+      if (fits && s > bestFittingScore) {
         bestFittingScore = s
         bestFittingIdx = i
       }
