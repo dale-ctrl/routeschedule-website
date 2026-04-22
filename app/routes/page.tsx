@@ -101,9 +101,15 @@ export default function RoutesPage() {
       const data = await res.json()
       if (res.ok) {
         fetchRoutes(selectedDepot)
-        setGenerateModal(false)
-        setGenerateResult(null)
-        setPreview(null)
+        if (data.warnings && data.warnings.length > 0) {
+          setGenerateResult(
+            `Generated ${data.total} route(s) with warnings:\n\n${data.warnings.join('\n\n')}`
+          )
+        } else {
+          setGenerateModal(false)
+          setGenerateResult(null)
+          setPreview(null)
+        }
       } else {
         setGenerateResult('Error: ' + (data.error ?? 'Unknown error'))
       }
@@ -254,7 +260,15 @@ export default function RoutesPage() {
 
           {generating && <div className="text-sm text-sky-600 text-center">Generating routes... this may take a moment.</div>}
           {generateResult && (
-            <div className={`rounded-lg p-3 text-sm ${generateResult.startsWith('Error') ? 'bg-red-50 text-red-700' : 'bg-green-50 text-green-700'}`}>
+            <div
+              className={`rounded-lg p-3 text-sm whitespace-pre-line ${
+                generateResult.startsWith('Error')
+                  ? 'bg-red-50 text-red-700'
+                  : generateResult.includes('warning')
+                    ? 'bg-amber-50 text-amber-800'
+                    : 'bg-green-50 text-green-700'
+              }`}
+            >
               {generateResult}
             </div>
           )}

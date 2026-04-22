@@ -53,11 +53,13 @@ export function planSlots(
     extraVanCapacity?: number
     maxRunsPerTruck?: number
     noDoubleRunTruckIds?: Set<string>
+    bonusVans?: number
   } = {}
 ): TruckSlot[] {
   const extraVanCapacity = opts.extraVanCapacity ?? EXTRA_VAN_CAPACITY
   const maxRunsPerTruck = opts.maxRunsPerTruck ?? MAX_RUNS_PER_TRUCK
   const noDoubleRun = opts.noDoubleRunTruckIds ?? new Set<string>()
+  const bonusVans = Math.max(0, opts.bonusVans ?? 0)
 
   const sorted = [...trucks]
     .filter((t) => t.capacity > 0)
@@ -95,7 +97,8 @@ export function planSlots(
   }
 
   let vanIdx = 1
-  while (cap < totalWeight) {
+  const targetCap = totalWeight + bonusVans * extraVanCapacity
+  while (cap < targetCap) {
     slots.push({
       truckId: `${EXTRA_VAN_PLACEHOLDER_PREFIX}${vanIdx}__`,
       truckName: `Extra Van ${vanIdx}`,

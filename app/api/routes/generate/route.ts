@@ -175,15 +175,19 @@ export async function POST(request: Request) {
       }
 
       const noDoubleRunTruckIds = new Set<string>()
+      let bonusVans = 0
       let candidates: Candidate[] = []
       let attempts = 0
-      const MAX_ATTEMPTS = 4
+      const MAX_ATTEMPTS = 10
+      const MAX_BONUS_VANS = 15
+      let lastAssignErr: string | null = null
 
       while (attempts < MAX_ATTEMPTS) {
         attempts++
         const plannedSlotsThisPass = planSlots(trucksWithLimit, totalWeight, {
           extraVanCapacity,
           noDoubleRunTruckIds,
+          bonusVans,
         })
 
         let slotsThisPass: TruckSlot[]
@@ -198,9 +202,15 @@ export async function POST(request: Request) {
         try {
           assignments = assignToTrucks(stops, slotsThisPass, minTruckLoadPct)
         } catch (err) {
-          errors.push(`Could not produce feasible routes for ${depotKey ?? 'unassigned'}: ${err instanceof Error ? err.message : String(err)}`)
-          candidates = []
-          break
+          // Infeasible packing — add another van's worth of capacity and retry.
+          lastAssignErr = err instanceof Error ? err.message : String(err)
+          if (bonusVans >= MAX_BONUS_VANS) {
+            errors.push(`Could not produce feasible routes for ${depotKey ?? 'unassigned'} even after ${bonusVans} bonus Extra Vans: ${lastAssignErr}`)
+            candidates = []
+            break
+          }
+          bonusVans++
+          continue
         }
 
         for (const s of slotsThisPass) {
@@ -238,14 +248,14 @@ export async function POST(request: Request) {
 
         if (newlyProhibited.length === 0) break
         newlyProhibited.forEach((id) => noDoubleRunTruckIds.add(id))
-        if (attempts === MAX_ATTEMPTS) {
-          errors.push(
-            `${depotKey ?? 'unassigned'}: driver-day limit (${DRIVER_DAY_LIMIT_MIN} min) could not be satisfied after ${MAX_ATTEMPTS} attempts — some trucks may still be over.`
-          )
-        }
       }
 
       if (candidates.length === 0) continue
+      if (attempts === MAX_ATTEMPTS && noDoubleRunTruckIds.size > 0) {
+        errors.push(
+          `${depotKey ?? 'unassigned'}: hit max replan attempts (${MAX_ATTEMPTS}). Some trucks may still exceed the ${DRIVER_DAY_LIMIT_MIN}-minute driver-day limit.`
+        )
+      }
 
       // Phase 3: persist routes + stops.
       for (const { assignment, orderedStops, routeDetails } of candidates) {
