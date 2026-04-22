@@ -354,27 +354,24 @@ export function assignToTrucks(
     const clusterWeight = cluster.reduce((s, st) => s + st.weight, 0)
     const centroid = clusterCentroid(cluster)
 
-    // Pick the best available slot for this cluster. Score (higher = better):
+    // Pick the best available slot for this cluster. Capacity is a HARD filter —
+    // we only consider non-fitting slots as a last resort, because assigning a heavy
+    // cluster to a too-small slot triggers rebalance cascades that scatter stops
+    // across unrelated clusters (routes then span half the country).
+    //
+    // Among fitting slots, score (higher = better):
     //   + 1000 per stop whose preferredTruckType matches the slot type
-    //   + 100 if cluster fits within slot capacity
     //   + 75 per London-postcode stop if the slot is an Extra Van (trucks struggle in
-    //       restricted-access zones like LEZ/ULEZ, low bridges etc. — vans handle them)
-    //   + (same-truck double-run bonus) 50 - distance_km_to_other_run_centroid, if the other run of
-    //       the same truck has already been assigned a cluster nearby
+    //       LEZ/ULEZ zones, low bridges etc. — vans handle them better)
+    //   + (same-truck double-run bonus) 50 - distance_km_to_other_run_centroid, if the
+    //       other run of the same truck has already been assigned a cluster nearby
     //   - capacity wasted (rough tie-breaker for packing)
     const londonStops = londonStopCount(cluster)
-    let bestIdx = -1
-    let bestScore = -Infinity
-
-    for (let i = 0; i < activeSlots.length; i++) {
-      if (usedSlotIdx.has(i)) continue
+    const scoreSlot = (i: number): number => {
       const slot = activeSlots[i]
       let score = 0
       score += preferredTypeScore(cluster, slot.type) * 1000
-      if (clusterWeight <= slot.capacity) score += 100
       if (slot.isExtraVan) score += londonStops * 75
-      // Double-run affinity: if same truck has another run already with a cluster assigned, prefer
-      // putting this cluster near it — that keeps both runs in the same area.
       for (let j = 0; j < activeSlots.length; j++) {
         if (j === i) continue
         if (!usedSlotIdx.has(j)) continue
@@ -385,8 +382,23 @@ export function assignToTrucks(
         score += Math.max(0, 50 - dKm)
       }
       score -= Math.abs(slot.capacity - clusterWeight) / 1000
-      if (score > bestScore) { bestScore = score; bestIdx = i }
+      return score
     }
+
+    let bestIdx = -1
+    let bestScore = -Infinity
+    let bestFittingIdx = -1
+    let bestFittingScore = -Infinity
+    for (let i = 0; i < activeSlots.length; i++) {
+      if (usedSlotIdx.has(i)) continue
+      const s = scoreSlot(i)
+      if (s > bestScore) { bestScore = s; bestIdx = i }
+      if (clusterWeight <= activeSlots[i].capacity && s > bestFittingScore) {
+        bestFittingScore = s
+        bestFittingIdx = i
+      }
+    }
+    if (bestFittingIdx !== -1) bestIdx = bestFittingIdx
 
     if (bestIdx === -1) bestIdx = activeSlots.findIndex((_, i) => !usedSlotIdx.has(i))
     if (bestIdx === -1) break
