@@ -354,13 +354,16 @@ export function assignToTrucks(
 
   let clusters: Stop[][]
   if (activeVanSlots.length > 0 && londonStops.length > 0) {
-    const vanCap = activeVanSlots[0].capacity
-    const londonWeight = londonStops.reduce((a, s) => a + s.weight, 0)
-    const londonClusterCount = Math.min(
-      Math.ceil(londonWeight / vanCap),
-      londonStops.length,
-      activeSlots.length
-    )
+    // Only split London into at most as many clusters as we have van slots.
+    // Clustering into more than that (e.g. ceil(londonWeight / vanCap)) steals
+    // cluster budget from the non-London stops, leaving trucks with too few
+    // clusters to carry their share — the resulting giant non-London clusters
+    // exceed truck capacity and rebalance ends up scattering stops everywhere.
+    // When London weight exceeds the vans' combined capacity, the van-cluster
+    // rebalance will push the overflow onto the nearest truck cluster — which
+    // is exactly the "mix a few London stops into a truck route" behaviour the
+    // user wants anyway.
+    const londonClusterCount = Math.min(activeVanSlots.length, londonStops.length)
     const nonLondonClusterCount = Math.min(
       activeSlots.length - londonClusterCount,
       nonLondonStops.length
