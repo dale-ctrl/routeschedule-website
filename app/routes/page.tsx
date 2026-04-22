@@ -65,6 +65,7 @@ export default function RoutesPage() {
   const [generateResult, setGenerateResult] = useState<string | null>(null)
   const [genForm, setGenForm] = useState(() => ({ ...getNextWorkingDay(), includeUnassigned: true }))
   const [preview, setPreview] = useState<{ dayCount: number; unassignedCount: number } | null>(null)
+  const [selected, setSelected] = useState<Set<string>>(new Set())
 
   const fetchRoutes = useCallback((depot: string) => {
     setLoading(true)
@@ -121,9 +122,58 @@ export default function RoutesPage() {
   }
 
   const handleDelete = async (id: string) => {
-    if (!confirm('Delete this route?')) return
-    await fetch(`/api/routes/${id}`, { method: 'DELETE' })
+    if (!confirm('Delete this route? Any scheduled orders on it will be reset to pending.')) return
+    const res = await fetch(`/api/routes?ids=${id}`, { method: 'DELETE' })
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) {
+      alert(`Delete failed: ${data.error ?? 'Unknown error'}`)
+      return
+    }
     fetchRoutes(selectedDepot)
+  }
+
+  const handleDeleteSelected = async () => {
+    const ids = [...selected]
+    if (ids.length === 0) return
+    if (!confirm(`Delete ${ids.length} route(s)? Any scheduled orders on them will be reset to pending.`)) return
+    const res = await fetch(`/api/routes?ids=${ids.join(',')}`, { method: 'DELETE' })
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) {
+      alert(`Delete failed: ${data.error ?? 'Unknown error'}`)
+      return
+    }
+    setSelected(new Set())
+    fetchRoutes(selectedDepot)
+  }
+
+  const handleDeleteAll = async () => {
+    const scope = selectedDepot ? `all ${routes.length} routes for ${selectedDepot}` : `ALL ${routes.length} routes`
+    if (!confirm(`Delete ${scope}? Any scheduled orders on them will be reset to pending. This cannot be undone.`)) return
+    const params = new URLSearchParams()
+    if (selectedDepot) params.set('depot', selectedDepot)
+    else params.set('all', 'true')
+    const res = await fetch(`/api/routes?${params}`, { method: 'DELETE' })
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) {
+      alert(`Delete failed: ${data.error ?? 'Unknown error'}`)
+      return
+    }
+    setSelected(new Set())
+    fetchRoutes(selectedDepot)
+  }
+
+  const toggleSelect = (id: string) => {
+    setSelected((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  const toggleAll = () => {
+    if (selected.size === routes.length) setSelected(new Set())
+    else setSelected(new Set(routes.map((r) => r.id)))
   }
 
   return (
@@ -143,6 +193,16 @@ export default function RoutesPage() {
                 {depots.map((d) => <option key={d.id} value={d.name}>{d.name}</option>)}
               </select>
             )}
+            {selected.size > 0 && (
+              <Button variant="danger" size="sm" onClick={handleDeleteSelected}>
+                <Trash2 size={14} /> Delete ({selected.size})
+              </Button>
+            )}
+            {routes.length > 0 && (
+              <Button variant="danger" size="sm" onClick={handleDeleteAll}>
+                <Trash2 size={14} /> Delete All{selectedDepot ? ` (${selectedDepot})` : ''} ({routes.length})
+              </Button>
+            )}
             <Button size="sm" onClick={() => { setGenerateModal(true); fetchPreview(genForm.day, selectedDepot) }}>
               <Zap size={14} /> Generate Routes
             </Button>
@@ -154,6 +214,13 @@ export default function RoutesPage() {
         <table className="data-table">
           <thead className="sticky top-0 z-10">
             <tr>
+              <th className="w-10">
+                <input
+                  type="checkbox"
+                  checked={selected.size === routes.length && routes.length > 0}
+                  onChange={toggleAll}
+                />
+              </th>
               <th>Route Name</th>
               <th>Date</th>
               <th>Truck</th>
@@ -166,16 +233,23 @@ export default function RoutesPage() {
             </tr>
           </thead>
           <tbody>
-            {loading && <tr><td colSpan={9} className="text-center py-8 text-gray-400">Loading...</td></tr>}
+            {loading && <tr><td colSpan={10} className="text-center py-8 text-gray-400">Loading...</td></tr>}
             {!loading && routes.length === 0 && (
               <tr>
-                <td colSpan={9} className="text-center py-12 text-gray-400">
+                <td colSpan={10} className="text-center py-12 text-gray-400">
                   No routes yet. Click <strong>Generate Routes</strong> to create routes from your pending orders.
                 </td>
               </tr>
             )}
             {routes.map((route) => (
               <tr key={route.id}>
+                <td>
+                  <input
+                    type="checkbox"
+                    checked={selected.has(route.id)}
+                    onChange={() => toggleSelect(route.id)}
+                  />
+                </td>
                 <td className="font-medium text-gray-900">{route.name}</td>
                 <td className="text-gray-600">{format(new Date(route.date), 'dd MMM yyyy')}</td>
                 <td>
