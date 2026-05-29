@@ -6,6 +6,11 @@ import { PageHeader } from '@/components/ui/PageHeader'
 import { Button } from '@/components/ui/Button'
 import { statusBadge } from '@/components/ui/Badge'
 import { formatWeight, formatDuration, formatDistance } from '@/lib/utils'
+import {
+  SERVICE_TIME_PER_DROP_MIN,
+  BREAK_MIN,
+  BREAK_AFTER_DRIVE_MIN,
+} from '@/lib/route-optimizer'
 import { ArrowLeft, MapPin, Clock, Weight, Truck as TruckIcon } from 'lucide-react'
 import Link from 'next/link'
 import { format } from 'date-fns'
@@ -42,6 +47,7 @@ interface RouteDetail {
   totalWeight: number
   totalDistance: number | null
   totalDuration: number | null
+  drivingDuration: number | null
   notes: string | null
   truck: {
     id: string
@@ -108,7 +114,12 @@ export default function RouteDetailPage({ params }: { params: Promise<{ id: stri
           <SummaryCard icon={<TruckIcon size={18} className="text-sky-500" />} label="Truck" value={route.truck.name} sub={route.truck.registration ?? route.truck.type} />
           <SummaryCard icon={<Weight size={18} className="text-purple-500" />} label="Total Weight" value={formatWeight(route.totalWeight)} sub={`Capacity: ${formatWeight(route.truck.capacity)}`} />
           <SummaryCard icon={<MapPin size={18} className="text-green-500" />} label="Distance" value={route.totalDistance ? formatDistance(route.totalDistance) : '—'} sub={`${route.stops.length} stops`} />
-          <SummaryCard icon={<Clock size={18} className="text-orange-500" />} label="Duration" value={route.totalDuration ? formatDuration(route.totalDuration) : '—'} sub={statusBadge(route.status) as unknown as string} />
+          <SummaryCard
+            icon={<Clock size={18} className="text-orange-500" />}
+            label="Working day"
+            value={route.totalDuration ? formatDuration(route.totalDuration) : '—'}
+            sub={renderTimeBreakdown(route.drivingDuration, route.stops.length) ?? (statusBadge(route.status) as unknown as string)}
+          />
         </div>
 
         <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
@@ -166,6 +177,22 @@ export default function RouteDetailPage({ params }: { params: Promise<{ id: stri
       </div>
     </div>
   )
+}
+
+/**
+ * Renders the driving / drops / break breakdown that adds up to the working-day total.
+ * Returns null when we don't have driving time (older routes) so the caller can fall back.
+ */
+function renderTimeBreakdown(drivingMin: number | null, stopCount: number): string | null {
+  if (drivingMin === null || drivingMin === undefined) return null
+  const service = stopCount * SERVICE_TIME_PER_DROP_MIN
+  const brk = drivingMin >= BREAK_AFTER_DRIVE_MIN ? BREAK_MIN : 0
+  const parts = [
+    `Drive ${formatDuration(drivingMin)}`,
+    `${stopCount} drops ${formatDuration(service)}`,
+  ]
+  if (brk > 0) parts.push(`Break ${formatDuration(brk)}`)
+  return parts.join(' · ')
 }
 
 function SummaryCard({ icon, label, value, sub }: { icon: React.ReactNode; label: string; value: string | React.ReactNode; sub: string | React.ReactNode }) {

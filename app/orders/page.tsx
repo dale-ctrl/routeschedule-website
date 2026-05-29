@@ -49,6 +49,7 @@ const STATUSES = [
   { value: '', label: 'All statuses' },
   { value: 'pending', label: 'Pending' },
   { value: 'scheduled', label: 'Scheduled' },
+  { value: 'pallet_network', label: 'Pallet network' },
   { value: 'delivered', label: 'Delivered' },
   { value: 'cancelled', label: 'Cancelled' },
 ]

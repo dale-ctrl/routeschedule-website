@@ -36,6 +36,101 @@ export const EXTRA_VAN_CAPACITY = 1500
 export const MAX_RUNS_PER_TRUCK = 2
 const EXTRA_VAN_PLACEHOLDER_PREFIX = '__extra_van_'
 
+/**
+ * Time model. Replaces the old driving-only 4-hour cap. The dispatcher cares
+ * about the actual hours a driver is out — drive time alone hides the fact
+ * that an 11-drop run is a ~9 hour day once unloading and the mandatory
+ * break are added.
+ */
+
+/** Max total working day per vehicle (minutes): driving + drops + break. */
+export const MAX_WORKING_DAY_MIN = 540 // 9h
+/** Service time added per drop for unloading (minutes). */
+export const SERVICE_TIME_PER_DROP_MIN = 15
+/** Mandatory driver break (minutes), inserted once driving exceeds threshold. */
+export const BREAK_MIN = 45
+/** Driving threshold that forces the 45-minute break (UK/EU drivers' hours). */
+export const BREAK_AFTER_DRIVE_MIN = 270 // 4h30
+/**
+ * If a stop's postcode is meaningfully closer to a different depot than the
+ * one the Despatch Office column points to, the importer redirects it.
+ * Threshold in straight-line km — 32km ≈ 20 miles.
+ */
+export const DEPOT_OVERRIDE_THRESHOLD_KM = 32
+/**
+ * Straight-line km beyond which a stop is treated as pallet-network rather
+ * than assigned to a depot vehicle. 100km ≈ 62 mi crow-flies ≈ ~75-90 mi by
+ * road — past this, a dedicated van run wastes most of the day even though
+ * it might still technically fit inside the working-hours cap. Tune up/down
+ * for tighter or looser delivery footprints.
+ */
+export const MAX_DEPOT_DISTANCE_KM = 100
+
+export interface RunTime {
+  drivingMin: number
+  serviceMin: number
+  breakMin: number
+  totalMin: number
+}
+
+/** Total working time for a run given OSRM driving minutes and the stop count. */
+export function computeRunTime(drivingMin: number, stopCount: number): RunTime {
+  const serviceMin = stopCount * SERVICE_TIME_PER_DROP_MIN
+  const breakMin = drivingMin >= BREAK_AFTER_DRIVE_MIN ? BREAK_MIN : 0
+  return { drivingMin, serviceMin, breakMin, totalMin: drivingMin + serviceMin + breakMin }
+}
+
+/**
+ * Rough drive-time estimate from straight-line km. Used for the pre-routing
+ * pallet-network check (calling OSRM for every candidate stop would be too
+ * expensive). OSRM refines actual drive time once a stop is routed.
+ *  - AVG_KPH 70 — blended motorway / A-road
+ *  - ROUTE_FACTOR 1.3 — UK roads vs great-circle detour
+ */
+export function estimateDriveMinFromKm(km: number): number {
+  const AVG_KPH = 70
+  const ROUTE_FACTOR = 1.3
+  return (km * ROUTE_FACTOR * 60) / AVG_KPH
+}
+
+export interface DepotLocation {
+  name: string
+  lat: number
+  lng: number
+}
+
+/** Nearest depot to a lat/lng by haversine distance (km). Returns null if no depots. */
+export function pickNearestDepot(
+  lat: number,
+  lng: number,
+  depots: DepotLocation[]
+): { depot: DepotLocation; km: number } | null {
+  if (depots.length === 0) return null
+  let best = depots[0]
+  let bestKm = haversineDistance(lat, lng, best.lat, best.lng)
+  for (let i = 1; i < depots.length; i++) {
+    const d = depots[i]
+    const km = haversineDistance(lat, lng, d.lat, d.lng)
+    if (km < bestKm) { bestKm = km; best = d }
+  }
+  return { depot: best, km: bestKm }
+}
+
+/**
+ * Does a single stop from this depot fit inside one vehicle's working day?
+ * round-trip estimated drive + 15min for the drop + 45min break if drive ≥ 4h30
+ * must be ≤ 9h. Stops that fail this are pallet-network candidates: even alone
+ * on a dedicated van they wouldn't make it back inside a legal day.
+ */
+export function stopFitsWorkingDay(
+  depot: { lat: number; lng: number },
+  stop: { lat: number; lng: number }
+): boolean {
+  const oneWayKm = haversineDistance(depot.lat, depot.lng, stop.lat, stop.lng)
+  const roundTripMin = estimateDriveMinFromKm(oneWayKm) * 2
+  return computeRunTime(roundTripMin, 1).totalMin <= MAX_WORKING_DAY_MIN
+}
+
 export function isExtraVanPlaceholder(truckId: string): boolean {
   return truckId.startsWith(EXTRA_VAN_PLACEHOLDER_PREFIX)
 }
@@ -142,6 +237,50 @@ function wcss(clusters: Stop[][]): number {
   return total
 }
 
+/**
+ * Cluster goodness — lower is better. Combines:
+ *  - within-cluster sum of squares (tightness)
+ *  - inter-cluster overlap penalty (separation)
+ *
+ * Pure WCSS happily accepts two clusters covering the same town as long as each
+ * is individually tight — which is exactly the "Blue and Green in the same areas"
+ * complaint. The overlap term treats each cluster as a circle (centroid + farthest
+ * stop radius) and penalises any pair whose circles intersect, so the multi-start
+ * search prefers partitions where regions don't bleed into each other.
+ */
+function clusterScore(clusters: Stop[][]): number {
+  const within = wcss(clusters)
+
+  const meta = clusters.map((c) => {
+    if (c.length === 0) return null
+    const lat = c.reduce((s, st) => s + st.lat, 0) / c.length
+    const lng = c.reduce((s, st) => s + st.lng, 0) / c.length
+    let r = 0
+    for (const st of c) {
+      const d = haversineDistance(st.lat, st.lng, lat, lng)
+      if (d > r) r = d
+    }
+    return { lat, lng, r }
+  })
+
+  let overlap = 0
+  for (let i = 0; i < meta.length; i++) {
+    const a = meta[i]
+    if (!a) continue
+    for (let j = i + 1; j < meta.length; j++) {
+      const b = meta[j]
+      if (!b) continue
+      const d = haversineDistance(a.lat, a.lng, b.lat, b.lng)
+      const intersect = Math.max(0, a.r + b.r - d)
+      overlap += intersect * intersect
+    }
+  }
+
+  // Same units as wcss (km²); weight tuned to nudge but not dominate.
+  const OVERLAP_WEIGHT = 0.5
+  return within + OVERLAP_WEIGHT * overlap
+}
+
 function runKMeansOnce(stops: Stop[], k: number, seed: number): Stop[][] {
   const rng = mulberry32(seed * 9973 + 1)
   const centers: { lat: number; lng: number }[] = []
@@ -233,10 +372,10 @@ function geographicCluster(stops: Stop[], k: number): Stop[][] {
 
   const RESTARTS = 40
   let best = runKMeansOnce(stops, k, 0)
-  let bestScore = wcss(best)
+  let bestScore = clusterScore(best)
   for (let seed = 1; seed < RESTARTS; seed++) {
     const candidate = runKMeansOnce(stops, k, seed)
-    const score = wcss(candidate)
+    const score = clusterScore(candidate)
     if (score < bestScore) {
       bestScore = score
       best = candidate

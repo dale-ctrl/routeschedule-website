@@ -80,9 +80,9 @@ export default function RoutesPage() {
     fetch('/api/depots').then((r) => r.json()).then(setDepots).catch(() => {})
   }, [fetchRoutes, selectedDepot])
 
-  const fetchPreview = useCallback((day: string, depot: string) => {
+  const fetchPreview = useCallback((day: string, date: string, depot: string) => {
     setPreview(null)
-    const params = new URLSearchParams({ day })
+    const params = new URLSearchParams({ day, date })
     if (depot) params.set('depot', depot)
     fetch(`/api/routes/preview?${params.toString()}`)
       .then((r) => r.json())
@@ -203,7 +203,7 @@ export default function RoutesPage() {
                 <Trash2 size={14} /> Delete All{selectedDepot ? ` (${selectedDepot})` : ''} ({routes.length})
               </Button>
             )}
-            <Button size="sm" onClick={() => { setGenerateModal(true); fetchPreview(genForm.day, selectedDepot) }}>
+            <Button size="sm" onClick={() => { setGenerateModal(true); fetchPreview(genForm.day, genForm.date, selectedDepot) }}>
               <Zap size={14} /> Generate Routes
             </Button>
           </div>
@@ -294,7 +294,7 @@ export default function RoutesPage() {
               const day = DAY_NAMES[d.getDay()] ?? genForm.day
               const updated = { ...genForm, date: e.target.value, day }
               setGenForm(updated)
-              fetchPreview(updated.day, selectedDepot)
+              fetchPreview(updated.day, updated.date, selectedDepot)
             }}
           />
 

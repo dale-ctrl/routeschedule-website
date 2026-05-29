@@ -3,16 +3,17 @@ import {
   assignToTrucks,
   optimizeStopOrder,
   planSlots,
+  computeRunTime,
   EXTRA_VAN_CAPACITY,
+  MAX_WORKING_DAY_MIN,
+  MAX_DEPOT_DISTANCE_KM,
   type TruckSlot,
   type TruckAssignment,
   type Stop,
 } from '@/lib/route-optimizer'
 import { getRouteDetails, osrmTripOptimize, type RouteResult } from '@/lib/routing'
 import { parseRule, getRouteWeightLimit, getMinTruckLoadPct } from '@/lib/rules-engine'
-
-/** Max on-road time per truck per day (minutes). Door-to-door: depot → stops → depot. */
-const DRIVER_DAY_LIMIT_MIN = 240
+import { haversineDistance } from '@/lib/utils'
 
 /**
  * Find or create real Truck DB rows to back any Extra Van placeholder slots.
@@ -77,6 +78,13 @@ export async function POST(request: Request) {
 
     const orders = allPending.filter((o) => {
       if (depot && o.depot !== depot) return false
+      // When sales tagged an exact delivery date at import (BKG_START), it's
+      // authoritative — only route the order on that specific date. This is
+      // what stops Dorset and London being routed together when they were for
+      // different actual dates.
+      if (o.deliveryDate) {
+        return o.deliveryDate.toISOString().slice(0, 10) === date
+      }
       if (!o.scheduledDay) return includeUnassigned === true
       return o.scheduledDay.split(',').map((d) => d.trim()).includes(day)
     })
@@ -123,6 +131,7 @@ export async function POST(request: Request) {
     const createdRoutes: { routeId: string; routeName: string; stops: number; isExtraVan: boolean; runNumber: number }[] = []
     const errors: string[] = []
     const extraVansCreated: string[] = []
+    let palletNetworkFlagged = 0
 
     for (const depotKey of depotKeys) {
       const depotOrders = depot ? orders : orders.filter((o) => (o.depot ?? null) === depotKey)
@@ -137,10 +146,12 @@ export async function POST(request: Request) {
       }
 
       let depotLocation = { lat: 51.5, lng: -1.8 }
+      let depotHasRealCoords = false
       if (depotKey) {
         const depotRecord = await prisma.depot.findUnique({ where: { name: depotKey } })
         if (depotRecord?.lat && depotRecord?.lng) {
           depotLocation = { lat: depotRecord.lat, lng: depotRecord.lng }
+          depotHasRealCoords = true
         }
       }
 
@@ -151,7 +162,41 @@ export async function POST(request: Request) {
         type: t.type ?? null,
       }))
 
-      const stops = depotOrders.map((o) => ({
+      // Pallet-network pre-filter. A stop whose straight-line distance to its
+      // assigned depot exceeds MAX_DEPOT_DISTANCE_KM is too far for an efficient
+      // van/truck run regardless of whether it technically fits a working day —
+      // beyond this range a dedicated van wastes most of the day on driving and
+      // the work belongs on a pallet network. The depot override at import time
+      // already moved each order to its nearest sensible depot, so this check
+      // against the assigned depot is equivalent to "no depot is close enough."
+      // Only fires when the depot has real coordinates; otherwise the UK-centre
+      // fallback would mis-flag stops at random.
+      const palletNetworkIds: string[] = []
+      const inAreaOrders = depotOrders.filter((o) => {
+        if (!depotHasRealCoords) return true
+        if (o.lat == null || o.lng == null) return true
+        const km = haversineDistance(depotLocation.lat, depotLocation.lng, o.lat, o.lng)
+        if (km > MAX_DEPOT_DISTANCE_KM) {
+          palletNetworkIds.push(o.id)
+          return false
+        }
+        return true
+      })
+
+      if (palletNetworkIds.length > 0) {
+        await prisma.order.updateMany({
+          where: { id: { in: palletNetworkIds } },
+          data: { status: 'pallet_network' },
+        })
+        palletNetworkFlagged += palletNetworkIds.length
+        errors.push(
+          `${depotKey ?? 'unassigned'}: ${palletNetworkIds.length} order(s) flagged as pallet network — more than ${MAX_DEPOT_DISTANCE_KM}km straight-line from depot.`
+        )
+      }
+
+      if (inAreaOrders.length === 0) continue
+
+      const stops = inAreaOrders.map((o) => ({
         id: o.id, lat: o.lat!, lng: o.lng!, weight: o.weight,
         customer: o.customer, postcode: o.postcode, address: o.address,
         deliveryTime: o.deliveryTime, priority: o.priority,
@@ -164,10 +209,10 @@ export async function POST(request: Request) {
         ? Math.min(EXTRA_VAN_CAPACITY, routeWeightLimit)
         : EXTRA_VAN_CAPACITY
 
-      // Plan → assign → OSRM → 4h check → replan (prohibit double-runs on trucks that
-      // exceeded the limit). Repeat until every truck fits within the driver day, or we
-      // run out of double-run options. The replan uses planSlots again which will
-      // automatically insert enough correctly-sized Extra Vans to absorb the overflow.
+      // Plan → assign → OSRM → working-day check → replan. If a truck's total day
+      // (drive + 15min/drop + 45min break ≥ 4h30 driving) exceeds 9h, prohibit its
+      // double-run; if even a single run overflows, add a bonus extra van. Repeat
+      // until every vehicle fits within the working day or we exhaust replans.
       type Candidate = {
         assignment: TruckAssignment
         orderedStops: Stop[]
@@ -227,8 +272,11 @@ export async function POST(request: Request) {
           candidates.push({ assignment, orderedStops, routeDetails })
         }
 
-        // Group non-extra-van runs by truck and find any truck whose door-to-door total
-        // exceeds the driver-day limit. Prohibit those trucks from getting a Run 2 next pass.
+        // Working-day check. The total time a driver is out (drive + drops + break)
+        // for all runs on the same vehicle must fit MAX_WORKING_DAY_MIN. If a truck
+        // with a Run 2 overflows, prohibit its double-run and replan. If anything
+        // overflows on its own (single run or an extra van), the depot doesn't have
+        // enough capacity — add a bonus extra van and replan.
         const byTruck = new Map<string, Candidate[]>()
         for (const c of candidates) {
           if (c.assignment.isExtraVan) continue
@@ -237,23 +285,37 @@ export async function POST(request: Request) {
           byTruck.set(c.assignment.truckId, arr)
         }
 
+        const runTime = (c: Candidate) =>
+          computeRunTime(c.routeDetails?.totalDuration ?? 0, c.orderedStops.length).totalMin
+
         const newlyProhibited: string[] = []
+        let overflowSingleRun = false
+
         for (const [truckId, runs] of byTruck) {
-          if (runs.length <= 1) continue
-          const total = runs.reduce((s, c) => s + (c.routeDetails?.totalDuration ?? 0), 0)
-          if (total > DRIVER_DAY_LIMIT_MIN && !noDoubleRunTruckIds.has(truckId)) {
+          const dayTotal = runs.reduce((s, c) => s + runTime(c), 0)
+          if (dayTotal <= MAX_WORKING_DAY_MIN) continue
+          if (runs.length > 1 && !noDoubleRunTruckIds.has(truckId)) {
             newlyProhibited.push(truckId)
+          } else {
+            overflowSingleRun = true
           }
         }
 
-        if (newlyProhibited.length === 0) break
+        // Extra Vans aren't grouped above; check each individually.
+        for (const c of candidates) {
+          if (!c.assignment.isExtraVan) continue
+          if (runTime(c) > MAX_WORKING_DAY_MIN) overflowSingleRun = true
+        }
+
+        if (newlyProhibited.length === 0 && !overflowSingleRun) break
         newlyProhibited.forEach((id) => noDoubleRunTruckIds.add(id))
+        if (overflowSingleRun && bonusVans < MAX_BONUS_VANS) bonusVans++
       }
 
       if (candidates.length === 0) continue
-      if (attempts === MAX_ATTEMPTS && noDoubleRunTruckIds.size > 0) {
+      if (attempts === MAX_ATTEMPTS) {
         errors.push(
-          `${depotKey ?? 'unassigned'}: hit max replan attempts (${MAX_ATTEMPTS}). Some trucks may still exceed the ${DRIVER_DAY_LIMIT_MIN}-minute driver-day limit.`
+          `${depotKey ?? 'unassigned'}: hit max replan attempts (${MAX_ATTEMPTS}). Some vehicles may still exceed the ${MAX_WORKING_DAY_MIN}-minute working-day limit.`
         )
       }
 
@@ -267,6 +329,13 @@ export async function POST(request: Request) {
             : ''
         const routeName = `${assignment.truckName}${runSuffix} - ${dayLabel} ${date}`
 
+        // totalDuration is now the full working-day total (drive + drops + break);
+        // drivingDuration stores the OSRM driving-only portion for the breakdown UI.
+        const drivingMin = routeDetails?.totalDuration ?? null
+        const workingDayMin = drivingMin !== null
+          ? computeRunTime(drivingMin, orderedStops.length).totalMin
+          : null
+
         const route = await prisma.route.create({
           data: {
             name: routeName,
@@ -275,7 +344,8 @@ export async function POST(request: Request) {
             status: 'planned',
             totalWeight: assignment.totalWeight,
             totalDistance: routeDetails?.totalDistance ?? null,
-            totalDuration: routeDetails?.totalDuration ?? null,
+            totalDuration: workingDayMin,
+            drivingDuration: drivingMin,
             depot: depotKey ?? null,
           },
         })
@@ -322,6 +392,7 @@ export async function POST(request: Request) {
       routeWeightLimitApplied: routeWeightLimit,
       extraVansUsed: extraVansCreated.length,
       doubleRuns: createdRoutes.filter((r) => !r.isExtraVan && r.runNumber > 1).length,
+      palletNetworkFlagged,
       warnings: errors.length > 0 ? errors : undefined,
     })
   } catch (err) {

@@ -38,6 +38,7 @@ model Order {
   lng          Float?
   status       String      @default("pending")
   scheduledDay String?
+  deliveryDate DateTime?   // exact date sales tagged the order with (BKG_START)
   importBatch  String?
   deliveryTime String?
   priority          Int         @default(0)
@@ -57,7 +58,8 @@ model Route {
   status        String      @default("planned")
   totalWeight   Float       @default(0)
   totalDistance Float?
-  totalDuration Int?
+  totalDuration Int?        // total working-day minutes: driving + drops + break
+  drivingDuration Int?      // OSRM driving-only minutes (subset of totalDuration)
   notes         String?
   depot         String?
   createdAt     DateTime    @default(now())

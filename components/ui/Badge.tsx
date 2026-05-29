@@ -38,6 +38,7 @@ export function statusBadge(status: string) {
     planned: { variant: 'info', label: 'Planned' },
     active: { variant: 'success', label: 'Active' },
     completed: { variant: 'success', label: 'Completed' },
+    pallet_network: { variant: 'purple', label: 'Pallet network' },
   }
   const cfg = map[status] ?? { variant: 'default' as const, label: status }
   return <Badge variant={cfg.variant}>{cfg.label}</Badge>
