@@ -11,7 +11,7 @@ import {
   type Stop,
 } from '@/lib/route-optimizer'
 import { getRouteDetails, osrmTripOptimize, type RouteResult } from '@/lib/routing'
-import { parseRule, getRouteWeightLimit, getMinTruckLoadPct } from '@/lib/rules-engine'
+import { parseRule, getRouteWeightLimit, getMinTruckLoadPct, getMaxRouteTime } from '@/lib/rules-engine'
 
 /**
  * Find or create real Truck DB rows to back any Extra Van placeholder slots.
@@ -107,29 +107,48 @@ export async function POST(request: Request) {
       )
     }
 
+    // Optional: the first active Pallet Network truck becomes the home for any
+    // stops the pallet-network filter pulls out of regular routing. We match
+    // either type='Pallet Network' OR a name containing "pallet network", so a
+    // truck the user just called "Pallet Network" (with default type) still
+    // gets picked up. We collect IDs first so we can also exclude these trucks
+    // from the regular fleet pool — otherwise the same truck could end up in
+    // both buckets.
+    const palletNetworkTrucks = await prisma.truck.findMany({
+      where: {
+        active: true,
+        OR: [
+          { type: 'Pallet Network' },
+          { name: { contains: 'pallet network' } },
+          { name: { contains: 'Pallet Network' } },
+        ],
+      },
+      orderBy: { createdAt: 'asc' },
+    })
+    const palletNetworkTruck = palletNetworkTrucks[0] ?? null
+    const palletNetworkTruckIds = palletNetworkTrucks.map((t) => t.id)
+
+    // Build the id filter carefully — if both a truckIds whitelist and a
+    // pallet-network blacklist are present we need to combine them, not
+    // overwrite one with the other via spread.
+    const idFilter: { in?: string[]; notIn?: string[] } = {}
+    if (truckIds && truckIds.length > 0) idFilter.in = truckIds
+    if (palletNetworkTruckIds.length > 0) idFilter.notIn = palletNetworkTruckIds
+
     const trucks = await prisma.truck.findMany({
       where: {
         active: true,
-        ...(truckIds && truckIds.length > 0 ? { id: { in: truckIds } } : {}),
-        // Exclude Extra Vans (provisioned on demand) and Pallet Network trucks
-        // (used only for flagged out-of-area stops, handled separately below).
-        type: { notIn: ['Extra Van', 'Pallet Network'] },
+        // Extra Vans are provisioned on demand. Pallet Network trucks are
+        // handled separately above, so exclude them from the regular fleet
+        // pool regardless of whether they were tagged by name or by type.
+        type: { not: 'Extra Van' },
+        ...(Object.keys(idFilter).length > 0 ? { id: idFilter } : {}),
       },
     })
 
     if (trucks.length === 0) {
       return Response.json({ error: 'No active trucks available.' }, { status: 400 })
     }
-
-    // Optional: the first active Pallet Network truck becomes the home for any
-    // stops the pallet-network filter pulls out of regular routing. Each flagged
-    // stop gets its own single-stop route on this truck so dispatchers can hand
-    // them off to the pallet network partner individually.
-    const palletNetworkTrucks = await prisma.truck.findMany({
-      where: { active: true, type: 'Pallet Network' },
-      orderBy: { createdAt: 'asc' },
-    })
-    const palletNetworkTruck = palletNetworkTrucks[0] ?? null
 
     const allRules = await prisma.rule.findMany({ where: { active: true } })
     const parsedRules = allRules.map(parseRule)
@@ -141,6 +160,11 @@ export async function POST(request: Request) {
     }))
     const routeWeightLimit = getRouteWeightLimit(parsedRules, ordersForRules)
     const minTruckLoadPct = getMinTruckLoadPct(parsedRules, ordersForRules)
+    const ruleMaxRouteTime = getMaxRouteTime(parsedRules, ordersForRules)
+    // Working-day cap used by the replan loop. The dispatcher's set_max_route_time
+    // rule fully overrides the built-in 9h default — including loosening it —
+    // because the dispatcher is the one who knows what's compliant for their drivers.
+    const maxWorkingDayMin = ruleMaxRouteTime ?? MAX_WORKING_DAY_MIN
 
     const depotKeys: (string | null)[] = depot
       ? [depot]
@@ -326,10 +350,11 @@ export async function POST(request: Request) {
         }
 
         // Working-day check. The total time a driver is out (drive + drops + break)
-        // for all runs on the same vehicle must fit MAX_WORKING_DAY_MIN. If a truck
-        // with a Run 2 overflows, prohibit its double-run and replan. If anything
-        // overflows on its own (single run or an extra van), the depot doesn't have
-        // enough capacity — add a bonus extra van and replan.
+        // for all runs on the same vehicle must fit maxWorkingDayMin (the rule-driven
+        // cap or the 9h default). If a truck with a Run 2 overflows, prohibit its
+        // double-run and replan. If anything overflows on its own (single run or an
+        // extra van), the depot doesn't have enough capacity — add a bonus extra van
+        // and replan.
         const byTruck = new Map<string, Candidate[]>()
         for (const c of candidates) {
           if (c.assignment.isExtraVan) continue
@@ -346,7 +371,7 @@ export async function POST(request: Request) {
 
         for (const [truckId, runs] of byTruck) {
           const dayTotal = runs.reduce((s, c) => s + runTime(c), 0)
-          if (dayTotal <= MAX_WORKING_DAY_MIN) continue
+          if (dayTotal <= maxWorkingDayMin) continue
           if (runs.length > 1 && !noDoubleRunTruckIds.has(truckId)) {
             newlyProhibited.push(truckId)
           } else {
@@ -357,7 +382,7 @@ export async function POST(request: Request) {
         // Extra Vans aren't grouped above; check each individually.
         for (const c of candidates) {
           if (!c.assignment.isExtraVan) continue
-          if (runTime(c) > MAX_WORKING_DAY_MIN) overflowSingleRun = true
+          if (runTime(c) > maxWorkingDayMin) overflowSingleRun = true
         }
 
         if (newlyProhibited.length === 0 && !overflowSingleRun) break
@@ -368,7 +393,7 @@ export async function POST(request: Request) {
       if (candidates.length === 0) continue
       if (attempts === MAX_ATTEMPTS) {
         errors.push(
-          `${depotKey ?? 'unassigned'}: hit max replan attempts (${MAX_ATTEMPTS}). Some vehicles may still exceed the ${MAX_WORKING_DAY_MIN}-minute working-day limit.`
+          `${depotKey ?? 'unassigned'}: hit max replan attempts (${MAX_ATTEMPTS}). Some vehicles may still exceed the ${maxWorkingDayMin}-minute working-day limit.`
         )
       }
 

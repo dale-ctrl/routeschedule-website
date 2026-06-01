@@ -55,6 +55,7 @@ const ACTION_TYPES = [
   { value: 'assign_day', label: 'Assign to single day' },
   { value: 'assign_days', label: 'Assign to multiple allowed days' },
   { value: 'set_run_weight_limit', label: 'Set max weight per truck run (kg)' },
+  { value: 'set_max_route_time', label: 'Set max working day per truck (minutes)' },
   { value: 'set_min_truck_load', label: 'Consolidate trucks — minimum load % before using a second truck' },
   { value: 'assign_truck_type', label: 'Require specific truck type' },
   { value: 'set_area', label: 'Set area label' },
@@ -68,6 +69,7 @@ const DAYS = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'
 const RULE_TYPES = [
   { value: 'area_day', label: 'Area / Day Assignment' },
   { value: 'route_weight_limit', label: 'Route Weight Limit (per truck run)' },
+  { value: 'route_time_limit', label: 'Working Day Time Limit (per truck)' },
   { value: 'weight', label: 'Order Weight Rule' },
   { value: 'time_window', label: 'Time Window' },
   { value: 'priority', label: 'Priority Rule' },
@@ -514,6 +516,27 @@ export default function RulesPage() {
                           onChange={(e) => updateAction(i, 'value', e.target.value)}
                         />
                         <span className="text-sm text-gray-500 shrink-0">kg max per truck run</span>
+                      </div>
+                    ) : action.type === 'set_max_route_time' ? (
+                      <div className="flex-1 flex items-center gap-2">
+                        <input
+                          type="number"
+                          min="60"
+                          max="900"
+                          step="15"
+                          className="w-28 px-2 py-1.5 text-sm border border-gray-300 rounded-lg bg-white"
+                          placeholder="540"
+                          value={action.value}
+                          onChange={(e) => updateAction(i, 'value', e.target.value)}
+                        />
+                        <span className="text-sm text-gray-500">
+                          min total day (drive + 15min/drop + 45min break){' '}
+                          {Number(action.value) > 0 && (
+                            <span className="text-gray-400">
+                              = {Math.floor(Number(action.value) / 60)}h{Number(action.value) % 60 ? ` ${Number(action.value) % 60}min` : ''}
+                            </span>
+                          )}
+                        </span>
                       </div>
                     ) : action.type === 'set_min_truck_load' ? (
                       <div className="flex-1 flex items-center gap-2">

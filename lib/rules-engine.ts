@@ -5,7 +5,7 @@ export interface Condition {
 }
 
 export interface Action {
-  type: 'assign_day' | 'assign_days' | 'assign_truck' | 'set_priority' | 'block' | 'set_delivery_time' | 'set_area' | 'set_run_weight_limit' | 'set_min_truck_load' | 'assign_truck_type'
+  type: 'assign_day' | 'assign_days' | 'assign_truck' | 'set_priority' | 'block' | 'set_delivery_time' | 'set_area' | 'set_run_weight_limit' | 'set_min_truck_load' | 'assign_truck_type' | 'set_max_route_time'
   value: string | number
 }
 
@@ -187,6 +187,51 @@ export function getRouteWeightLimit(
   }
 
   return minLimit
+}
+
+/**
+ * Evaluate all active set_max_route_time rules against the batch being routed.
+ * A rule applies if it has no conditions, OR if any order in the batch matches
+ * its conditions. Returns the lowest applicable cap in minutes (tightest wins)
+ * so that the route generator can cap any vehicle day at the smallest limit
+ * any rule asks for. Returns null when no rules apply — the generator then
+ * falls back to its built-in MAX_WORKING_DAY_MIN default.
+ *
+ * The cap is interpreted as the FULL round-trip working day for one vehicle:
+ * depot → first drop → between drops → last drop → depot (OSRM driving), plus
+ * 15min per drop for unloading, plus 45min mid-day break if total driving
+ * crosses the UK/EU drivers' threshold (4h30). Match computeRunTime().
+ */
+export function getMaxRouteTime(
+  rules: ParsedRule[],
+  orders: OrderForRules[]
+): number | null {
+  const timeRules = rules.filter(
+    (r) => r.active && r.actions.some((a) => a.type === 'set_max_route_time')
+  )
+
+  if (timeRules.length === 0) return null
+
+  let minMinutes: number | null = null
+
+  for (const rule of timeRules) {
+    const applies =
+      rule.conditions.length === 0 ||
+      orders.some((o) => conditionsMatch(o, rule.conditions, rule.conditionLogic))
+
+    if (!applies) continue
+
+    for (const action of rule.actions) {
+      if (action.type === 'set_max_route_time') {
+        const mins = Number(action.value)
+        if (!isNaN(mins) && mins > 0 && (minMinutes === null || mins < minMinutes)) {
+          minMinutes = mins
+        }
+      }
+    }
+  }
+
+  return minMinutes
 }
 
 /**
