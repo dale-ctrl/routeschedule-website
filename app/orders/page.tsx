@@ -8,6 +8,7 @@ import { Input, Select } from '@/components/ui/Input'
 import { statusBadge } from '@/components/ui/Badge'
 import { formatWeight, haversineDistance } from '@/lib/utils'
 import { PALLET_NETWORK_WARNING_KM } from '@/lib/route-optimizer'
+import { useToast } from '@/components/ui/Toast'
 import { Upload, Plus, Trash2, Search, RefreshCw, Pencil, RotateCcw, AlertTriangle } from 'lucide-react'
 import Papa from 'papaparse'
 import * as XLSX from 'xlsx'
@@ -58,6 +59,7 @@ const STATUSES = [
 ]
 
 export default function OrdersPage() {
+  const { push: pushToast } = useToast()
   const [orders, setOrders] = useState<Order[]>([])
   const [total, setTotal] = useState(0)
   const [page, setPage] = useState(1)
@@ -71,7 +73,7 @@ export default function OrdersPage() {
   const [importModal, setImportModal] = useState(false)
   const [editOrder, setEditOrder] = useState<Order | null>(null)
   const [importing, setImporting] = useState(false)
-  const [importResult, setImportResult] = useState<string | null>(null)
+  const [importError, setImportError] = useState<string | null>(null)
   const [geocoding, setGeocoding] = useState(false)
   const [resetting, setResetting] = useState(false)
   const fileRef = useRef<HTMLInputElement>(null)
@@ -102,7 +104,7 @@ export default function OrdersPage() {
 
   const handleFileImport = async (file: File) => {
     setImporting(true)
-    setImportResult(null)
+    setImportError(null)
     try {
       let rows: Record<string, string>[] = []
 
@@ -124,13 +126,21 @@ export default function OrdersPage() {
       })
       const data = await res.json()
       if (!res.ok) {
-        setImportResult(`Import failed: ${data.error ?? 'Unknown server error'}`)
+        setImportError(`Import failed: ${data.error ?? 'Unknown server error'}`)
         return
       }
-      setImportResult(`Imported ${data.imported} orders. Geocoded: ${data.geocoded}`)
+      // Success: close the modal and report via toast so the dispatcher gets
+      // an at-a-glance confirmation without having to dismiss the modal first.
+      setImportModal(false)
+      if (fileRef.current) fileRef.current.value = ''
+      pushToast({
+        title: 'Import complete',
+        message: `Imported ${data.imported} orders, Geocoded: ${data.geocoded}`,
+        variant: 'success',
+      })
       fetchOrders()
     } catch (err) {
-      setImportResult('Import failed: ' + String(err))
+      setImportError('Import failed: ' + String(err))
     } finally {
       setImporting(false)
     }
@@ -412,7 +422,7 @@ export default function OrdersPage() {
       )}
 
       {/* Import Modal */}
-      <Modal open={importModal} onClose={() => { setImportModal(false); setImportResult(null) }} title="Import Orders" size="lg">
+      <Modal open={importModal} onClose={() => { setImportModal(false); setImportError(null) }} title="Import Orders" size="lg">
         <div className="space-y-4">
           <div className="bg-gray-50 rounded-lg p-4 text-sm text-gray-600">
             <p className="font-medium text-gray-800 mb-2">Accepted file formats: CSV or Excel (.xlsx)</p>
@@ -446,9 +456,9 @@ export default function OrdersPage() {
           />
 
           {importing && <div className="text-sm text-sky-600 text-center">Importing and geocoding... this may take a moment.</div>}
-          {importResult && (
-            <div className="bg-green-50 border border-green-200 rounded-lg p-3 text-sm text-green-700">
-              {importResult}
+          {importError && (
+            <div className="bg-red-50 border border-red-200 rounded-lg p-3 text-sm text-red-700">
+              {importError}
             </div>
           )}
 
