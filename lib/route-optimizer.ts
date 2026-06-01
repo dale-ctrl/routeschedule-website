@@ -59,12 +59,13 @@ export const BREAK_AFTER_DRIVE_MIN = 270 // 4h30
 export const DEPOT_OVERRIDE_THRESHOLD_KM = 32
 /**
  * Straight-line km beyond which a stop is treated as pallet-network rather
- * than assigned to a depot vehicle. 100km ≈ 62 mi crow-flies ≈ ~75-90 mi by
+ * than assigned to a depot vehicle. 80km ≈ 50 mi crow-flies ≈ ~60-75 mi by
  * road — past this, a dedicated van run wastes most of the day even though
- * it might still technically fit inside the working-hours cap. Tune up/down
+ * it might still technically fit inside the working-hours cap. Brighton from
+ * Andover sits at ~99km, which sets the floor for this number. Tune up/down
  * for tighter or looser delivery footprints.
  */
-export const MAX_DEPOT_DISTANCE_KM = 100
+export const MAX_DEPOT_DISTANCE_KM = 80
 
 export interface RunTime {
   drivingMin: number

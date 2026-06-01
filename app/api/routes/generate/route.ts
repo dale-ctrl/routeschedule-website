@@ -104,14 +104,25 @@ export async function POST(request: Request) {
       where: {
         active: true,
         ...(truckIds && truckIds.length > 0 ? { id: { in: truckIds } } : {}),
-        // Exclude Extra Van pool from the "regular fleet" — they are provisioned on demand below.
-        NOT: { type: 'Extra Van' },
+        // Exclude Extra Vans (provisioned on demand) and Pallet Network trucks
+        // (used only for flagged out-of-area stops, handled separately below).
+        type: { notIn: ['Extra Van', 'Pallet Network'] },
       },
     })
 
     if (trucks.length === 0) {
       return Response.json({ error: 'No active trucks available.' }, { status: 400 })
     }
+
+    // Optional: the first active Pallet Network truck becomes the home for any
+    // stops the pallet-network filter pulls out of regular routing. Each flagged
+    // stop gets its own single-stop route on this truck so dispatchers can hand
+    // them off to the pallet network partner individually.
+    const palletNetworkTrucks = await prisma.truck.findMany({
+      where: { active: true, type: 'Pallet Network' },
+      orderBy: { createdAt: 'asc' },
+    })
+    const palletNetworkTruck = palletNetworkTrucks[0] ?? null
 
     const allRules = await prisma.rule.findMany({ where: { active: true } })
     const parsedRules = allRules.map(parseRule)
@@ -184,14 +195,60 @@ export async function POST(request: Request) {
       })
 
       if (palletNetworkIds.length > 0) {
-        await prisma.order.updateMany({
-          where: { id: { in: palletNetworkIds } },
-          data: { status: 'pallet_network' },
-        })
         palletNetworkFlagged += palletNetworkIds.length
-        errors.push(
-          `${depotKey ?? 'unassigned'}: ${palletNetworkIds.length} order(s) flagged as pallet network — more than ${MAX_DEPOT_DISTANCE_KM}km straight-line from depot.`
-        )
+
+        if (palletNetworkTruck) {
+          // Materialise each flagged stop as its own single-stop route on the
+          // Pallet Network truck. No clustering, no OSRM call — these don't
+          // share a vehicle day with anything else, the partner handles the
+          // actual delivery, and dispatchers just need them visible per stop.
+          const dayLabel = day.charAt(0).toUpperCase() + day.slice(1)
+          const flaggedOrders = depotOrders.filter((o) => palletNetworkIds.includes(o.id))
+
+          for (const order of flaggedOrders) {
+            const routeName = `Pallet Network - ${dayLabel} ${date} - ${order.customer}`
+            const route = await prisma.route.create({
+              data: {
+                name: routeName,
+                date: new Date(date + 'T08:00:00.000Z'),
+                truckId: palletNetworkTruck.id,
+                status: 'planned',
+                totalWeight: order.weight,
+                depot: depotKey ?? null,
+              },
+            })
+            await prisma.routeStop.create({
+              data: {
+                routeId: route.id,
+                orderId: order.id,
+                truckId: palletNetworkTruck.id,
+                sequence: 1,
+              },
+            })
+            await prisma.order.update({
+              where: { id: order.id },
+              data: { status: 'scheduled' },
+            })
+            createdRoutes.push({
+              routeId: route.id,
+              routeName,
+              stops: 1,
+              isExtraVan: false,
+              runNumber: 1,
+            })
+          }
+        } else {
+          // No Pallet Network truck configured — just flag the orders so they
+          // aren't routed. Dispatcher can create a "Pallet Network" truck and
+          // re-generate to have them picked up automatically.
+          await prisma.order.updateMany({
+            where: { id: { in: palletNetworkIds } },
+            data: { status: 'pallet_network' },
+          })
+          errors.push(
+            `${depotKey ?? 'unassigned'}: ${palletNetworkIds.length} order(s) flagged as pallet network — more than ${MAX_DEPOT_DISTANCE_KM}km straight-line from depot. Add a truck with type "Pallet Network" to route these automatically.`
+          )
+        }
       }
 
       if (inAreaOrders.length === 0) continue

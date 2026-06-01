@@ -2,6 +2,7 @@
 
 import { useEffect, useState, use } from 'react'
 import dynamic from 'next/dynamic'
+import { useRouter } from 'next/navigation'
 import { PageHeader } from '@/components/ui/PageHeader'
 import { Button } from '@/components/ui/Button'
 import { statusBadge } from '@/components/ui/Badge'
@@ -11,7 +12,7 @@ import {
   BREAK_MIN,
   BREAK_AFTER_DRIVE_MIN,
 } from '@/lib/route-optimizer'
-import { ArrowLeft, MapPin, Clock, Weight, Truck as TruckIcon } from 'lucide-react'
+import { ArrowLeft, MapPin, Clock, Weight, Truck as TruckIcon, X } from 'lucide-react'
 import Link from 'next/link'
 import { format } from 'date-fns'
 
@@ -61,8 +62,14 @@ interface RouteDetail {
 
 export default function RouteDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params)
+  const router = useRouter()
   const [route, setRoute] = useState<RouteDetail | null>(null)
   const [loading, setLoading] = useState(true)
+  const [removing, setRemoving] = useState<string | null>(null)
+
+  const refetchRoute = () => {
+    fetch(`/api/routes/${id}`).then((r) => r.json()).then(setRoute)
+  }
 
   useEffect(() => {
     fetch(`/api/routes/${id}`)
@@ -70,6 +77,26 @@ export default function RouteDetailPage({ params }: { params: Promise<{ id: stri
       .then(setRoute)
       .finally(() => setLoading(false))
   }, [id])
+
+  const handleRemoveStop = async (stopId: string, customer: string) => {
+    if (!confirm(`Remove ${customer} from this route? The order will go back to pending so you can re-route it.`)) return
+    setRemoving(stopId)
+    try {
+      const res = await fetch(`/api/routes/${id}/stops/${stopId}`, { method: 'DELETE' })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        alert(`Remove failed: ${data.error ?? 'Unknown error'}`)
+        return
+      }
+      if (data.routeDeleted) {
+        router.push('/routes')
+        return
+      }
+      refetchRoute()
+    } finally {
+      setRemoving(null)
+    }
+  }
 
   if (loading) return <div className="flex-1 flex items-center justify-center text-gray-400">Loading route...</div>
   if (!route) return <div className="flex-1 flex items-center justify-center text-gray-400">Route not found.</div>
@@ -138,6 +165,7 @@ export default function RouteDetailPage({ params }: { params: Promise<{ id: stri
                     <th>Weight</th>
                     <th>Time</th>
                     <th>Drive</th>
+                    <th className="w-10"></th>
                   </tr>
                 </thead>
                 <tbody>
@@ -152,6 +180,16 @@ export default function RouteDetailPage({ params }: { params: Promise<{ id: stri
                       <td className="text-sm">{formatWeight(stop.order.weight)}</td>
                       <td className="text-xs text-gray-500 capitalize">{stop.order.deliveryTime ?? '—'}</td>
                       <td className="text-xs text-gray-500">{stop.duration ? formatDuration(stop.duration) : '—'}</td>
+                      <td>
+                        <button
+                          onClick={() => handleRemoveStop(stop.id, stop.order.customer)}
+                          disabled={removing === stop.id}
+                          title="Remove from this route (order goes back to pending)"
+                          className="p-1 text-gray-300 hover:text-red-600 disabled:opacity-30 transition-colors rounded"
+                        >
+                          <X size={14} />
+                        </button>
+                      </td>
                     </tr>
                   ))}
                 </tbody>

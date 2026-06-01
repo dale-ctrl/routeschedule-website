@@ -40,6 +40,7 @@ const TRUCK_TYPES = [
   { value: '7.5T DAF', label: '7.5T DAF' },
   { value: '3.5T Transit', label: '3.5T Transit' },
   { value: 'Artic', label: 'Articulated' },
+  { value: 'Pallet Network', label: 'Pallet Network' },
   { value: 'Custom', label: 'Custom' },
 ]
 
