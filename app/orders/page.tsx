@@ -6,8 +6,9 @@ import { Button } from '@/components/ui/Button'
 import { Modal } from '@/components/ui/Modal'
 import { Input, Select } from '@/components/ui/Input'
 import { statusBadge } from '@/components/ui/Badge'
-import { formatWeight } from '@/lib/utils'
-import { Upload, Plus, Trash2, Search, RefreshCw, Pencil, RotateCcw } from 'lucide-react'
+import { formatWeight, haversineDistance } from '@/lib/utils'
+import { PALLET_NETWORK_WARNING_KM } from '@/lib/route-optimizer'
+import { Upload, Plus, Trash2, Search, RefreshCw, Pencil, RotateCcw, AlertTriangle } from 'lucide-react'
 import Papa from 'papaparse'
 import * as XLSX from 'xlsx'
 
@@ -33,6 +34,8 @@ interface Order {
 interface Depot {
   id: string
   name: string
+  lat: number | null
+  lng: number | null
 }
 
 const DAYS = [
@@ -172,6 +175,26 @@ export default function OrdersPage() {
     fetchOrders()
   }
 
+  // Depot lookup by name → lat/lng for the inline pallet-network warning.
+  const depotCoords = useCallback(
+    (name: string | null): { lat: number; lng: number } | null => {
+      if (!name) return null
+      const d = depots.find((x) => x.name === name)
+      if (!d || d.lat == null || d.lng == null) return null
+      return { lat: d.lat, lng: d.lng }
+    },
+    [depots]
+  )
+
+  const handleStatusChange = async (orderId: string, newStatus: string) => {
+    await fetch('/api/orders', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids: [orderId], status: newStatus }),
+    })
+    fetchOrders()
+  }
+
   const handleResetToPending = async () => {
     const ids = selected.size > 0 ? [...selected] : null
     const msg = ids ? `Reset ${ids.length} selected order(s) to pending?` : 'Reset ALL scheduled orders back to pending?'
@@ -306,30 +329,73 @@ export default function OrdersPage() {
                 </td>
               </tr>
             )}
-            {orders.map((order) => (
-              <tr key={order.id}>
-                <td>
-                  <input type="checkbox" checked={selected.has(order.id)} onChange={() => toggleSelect(order.id)} />
-                </td>
-                <td className="font-medium text-gray-900">{order.customer}</td>
-                <td className="text-gray-500">{order.reference ?? '—'}</td>
-                <td className="font-mono text-sm">{order.postcode}</td>
-                <td className="text-gray-500">{order.area ?? '—'}</td>
-                <td>{formatWeight(order.weight)}</td>
-                <td className="capitalize text-gray-600">{order.scheduledDay ?? '—'}</td>
-                <td>{statusBadge(order.status)}</td>
-                <td>
-                  <span className={`text-xs ${order.lat ? 'text-green-600' : 'text-gray-400'}`}>
-                    {order.lat ? '✓' : '✗'}
-                  </span>
-                </td>
-                <td>
-                  <button onClick={() => setEditOrder(order)} className="text-gray-400 hover:text-sky-600 transition-colors">
-                    <Pencil size={14} />
-                  </button>
-                </td>
-              </tr>
-            ))}
+            {orders.map((order) => {
+              // Soft pallet-network suggestion: order is still pending, has a
+              // geocode, and its depot has coords, AND it's further than the
+              // suggestion threshold. The system never auto-flips status — the
+              // dispatcher decides via the inline dropdown.
+              const depotLatLng = depotCoords(order.depot)
+              const suggestsPalletNetwork =
+                order.status === 'pending' &&
+                order.lat != null && order.lng != null &&
+                depotLatLng != null &&
+                haversineDistance(depotLatLng.lat, depotLatLng.lng, order.lat, order.lng) > PALLET_NETWORK_WARNING_KM
+
+              return (
+                <tr key={order.id}>
+                  <td>
+                    <input type="checkbox" checked={selected.has(order.id)} onChange={() => toggleSelect(order.id)} />
+                  </td>
+                  <td className="font-medium text-gray-900">
+                    <div className="flex items-center gap-1.5">
+                      {suggestsPalletNetwork && (
+                        <span
+                          title={`More than ${PALLET_NETWORK_WARNING_KM}km from depot — consider switching status to Pallet Network`}
+                          className="shrink-0"
+                        >
+                          <AlertTriangle size={14} className="text-amber-500" />
+                        </span>
+                      )}
+                      <span>{order.customer}</span>
+                    </div>
+                  </td>
+                  <td className="text-gray-500">{order.reference ?? '—'}</td>
+                  <td className="font-mono text-sm">{order.postcode}</td>
+                  <td className="text-gray-500">{order.area ?? '—'}</td>
+                  <td>{formatWeight(order.weight)}</td>
+                  <td className="capitalize text-gray-600">{order.scheduledDay ?? '—'}</td>
+                  <td>
+                    {(order.status === 'pending' || order.status === 'pallet_network') ? (
+                      <select
+                        value={order.status}
+                        onChange={(e) => handleStatusChange(order.id, e.target.value)}
+                        className={`text-xs font-medium border rounded-full px-2 py-0.5 cursor-pointer focus:outline-none ${
+                          order.status === 'pallet_network'
+                            ? 'bg-purple-100 text-purple-700 border-purple-200'
+                            : 'bg-yellow-100 text-yellow-700 border-yellow-200'
+                        }`}
+                        title="Change status"
+                      >
+                        <option value="pending">Pending</option>
+                        <option value="pallet_network">Pallet network</option>
+                      </select>
+                    ) : (
+                      statusBadge(order.status)
+                    )}
+                  </td>
+                  <td>
+                    <span className={`text-xs ${order.lat ? 'text-green-600' : 'text-gray-400'}`}>
+                      {order.lat ? '✓' : '✗'}
+                    </span>
+                  </td>
+                  <td>
+                    <button onClick={() => setEditOrder(order)} className="text-gray-400 hover:text-sky-600 transition-colors">
+                      <Pencil size={14} />
+                    </button>
+                  </td>
+                </tr>
+              )
+            })}
           </tbody>
         </table>
       </div>

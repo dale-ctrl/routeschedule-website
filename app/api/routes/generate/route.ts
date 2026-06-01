@@ -6,14 +6,12 @@ import {
   computeRunTime,
   EXTRA_VAN_CAPACITY,
   MAX_WORKING_DAY_MIN,
-  MAX_DEPOT_DISTANCE_KM,
   type TruckSlot,
   type TruckAssignment,
   type Stop,
 } from '@/lib/route-optimizer'
 import { getRouteDetails, osrmTripOptimize, type RouteResult } from '@/lib/routing'
 import { parseRule, getRouteWeightLimit, getMinTruckLoadPct } from '@/lib/rules-engine'
-import { haversineDistance } from '@/lib/utils'
 
 /**
  * Find or create real Truck DB rows to back any Extra Van placeholder slots.
@@ -72,11 +70,20 @@ export async function POST(request: Request) {
       return Response.json({ error: 'day and date are required' }, { status: 400 })
     }
 
-    const allPending = await prisma.order.findMany({
-      where: { status: 'pending', lat: { not: null }, lng: { not: null } },
+    // Pull both pending and pallet-network statuses — the dispatcher manually
+    // marks orders as pallet_network on the Orders page, and the generator
+    // then materialises them as single-stop routes on the Pallet Network truck
+    // (handled inside the depot loop). Without that pickup, manually-flagged
+    // orders would just sit in pallet_network status forever.
+    const allCandidates = await prisma.order.findMany({
+      where: {
+        status: { in: ['pending', 'pallet_network'] },
+        lat: { not: null },
+        lng: { not: null },
+      },
     })
 
-    const orders = allPending.filter((o) => {
+    const orders = allCandidates.filter((o) => {
       if (depot && o.depot !== depot) return false
       // When sales tagged an exact delivery date at import (BKG_START), it's
       // authoritative — only route the order on that specific date. This is
@@ -157,12 +164,10 @@ export async function POST(request: Request) {
       }
 
       let depotLocation = { lat: 51.5, lng: -1.8 }
-      let depotHasRealCoords = false
       if (depotKey) {
         const depotRecord = await prisma.depot.findUnique({ where: { name: depotKey } })
         if (depotRecord?.lat && depotRecord?.lng) {
           depotLocation = { lat: depotRecord.lat, lng: depotRecord.lng }
-          depotHasRealCoords = true
         }
       }
 
@@ -173,21 +178,14 @@ export async function POST(request: Request) {
         type: t.type ?? null,
       }))
 
-      // Pallet-network pre-filter. A stop whose straight-line distance to its
-      // assigned depot exceeds MAX_DEPOT_DISTANCE_KM is too far for an efficient
-      // van/truck run regardless of whether it technically fits a working day —
-      // beyond this range a dedicated van wastes most of the day on driving and
-      // the work belongs on a pallet network. The depot override at import time
-      // already moved each order to its nearest sensible depot, so this check
-      // against the assigned depot is equivalent to "no depot is close enough."
-      // Only fires when the depot has real coordinates; otherwise the UK-centre
-      // fallback would mis-flag stops at random.
+      // Pull manually-flagged pallet-network orders out of the normal routing
+      // flow — they go onto the Pallet Network truck as single-stop routes,
+      // not into clustering. The Orders page surfaces a soft warning for stops
+      // beyond PALLET_NETWORK_WARNING_KM and lets dispatchers flip them to
+      // 'pallet_network' status; nothing here decides for them automatically.
       const palletNetworkIds: string[] = []
       const inAreaOrders = depotOrders.filter((o) => {
-        if (!depotHasRealCoords) return true
-        if (o.lat == null || o.lng == null) return true
-        const km = haversineDistance(depotLocation.lat, depotLocation.lng, o.lat, o.lng)
-        if (km > MAX_DEPOT_DISTANCE_KM) {
+        if (o.status === 'pallet_network') {
           palletNetworkIds.push(o.id)
           return false
         }
@@ -238,15 +236,13 @@ export async function POST(request: Request) {
             })
           }
         } else {
-          // No Pallet Network truck configured — just flag the orders so they
-          // aren't routed. Dispatcher can create a "Pallet Network" truck and
-          // re-generate to have them picked up automatically.
-          await prisma.order.updateMany({
-            where: { id: { in: palletNetworkIds } },
-            data: { status: 'pallet_network' },
-          })
+          // Dispatcher marked these as pallet_network on the Orders page but
+          // there's no Pallet Network truck configured to receive them — leave
+          // them in pallet_network status and surface a warning so they're
+          // visible. Adding a "Pallet Network" truck and re-generating will
+          // pick them up automatically.
           errors.push(
-            `${depotKey ?? 'unassigned'}: ${palletNetworkIds.length} order(s) flagged as pallet network — more than ${MAX_DEPOT_DISTANCE_KM}km straight-line from depot. Add a truck with type "Pallet Network" to route these automatically.`
+            `${depotKey ?? 'unassigned'}: ${palletNetworkIds.length} order(s) marked as pallet network but no Pallet Network truck exists — add a truck with type "Pallet Network" to route these automatically.`
           )
         }
       }

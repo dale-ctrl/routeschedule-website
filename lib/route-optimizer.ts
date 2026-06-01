@@ -58,14 +58,14 @@ export const BREAK_AFTER_DRIVE_MIN = 270 // 4h30
  */
 export const DEPOT_OVERRIDE_THRESHOLD_KM = 32
 /**
- * Straight-line km beyond which a stop is treated as pallet-network rather
- * than assigned to a depot vehicle. 80km ≈ 50 mi crow-flies ≈ ~60-75 mi by
- * road — past this, a dedicated van run wastes most of the day even though
- * it might still technically fit inside the working-hours cap. Brighton from
- * Andover sits at ~99km, which sets the floor for this number. Tune up/down
- * for tighter or looser delivery footprints.
+ * Soft suggestion threshold. Orders whose straight-line distance to their
+ * assigned depot exceeds this are surfaced on the Orders page with a warning
+ * triangle so dispatchers can decide whether to hand them off as pallet
+ * network — but the system never auto-flags them, because edge cases at the
+ * boundary (e.g. Brighton from Andover at ~99km) are genuinely judgement
+ * calls. Dispatchers flip the order's status to 'pallet_network' manually.
  */
-export const MAX_DEPOT_DISTANCE_KM = 80
+export const PALLET_NETWORK_WARNING_KM = 100
 
 export interface RunTime {
   drivingMin: number
