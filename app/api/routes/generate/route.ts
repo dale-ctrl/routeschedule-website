@@ -4,14 +4,21 @@ import {
   optimizeStopOrder,
   planSlots,
   computeRunTime,
+  computeStopSchedule,
+  sequenceForTimeWindows,
+  hasTimeConstraints,
+  estimateDurationMatrix,
   EXTRA_VAN_CAPACITY,
   MAX_WORKING_DAY_MIN,
+  DEFAULT_DAY_START_MIN,
   type TruckSlot,
   type TruckAssignment,
   type Stop,
+  type Schedule,
 } from '@/lib/route-optimizer'
-import { getRouteDetails, osrmTripOptimize, type RouteResult } from '@/lib/routing'
+import { getRouteDetails, osrmTripOptimize, osrmDurationMatrix, type RouteResult } from '@/lib/routing'
 import { parseRule, getRouteWeightLimit, getMinTruckLoadPct, getMaxRouteTime } from '@/lib/rules-engine'
+import { effectiveWindow, parseFlags, clockToMinutes, formatClock } from '@/lib/special-instructions'
 
 /**
  * Find or create real Truck DB rows to back any Extra Van placeholder slots.
@@ -155,8 +162,8 @@ export async function POST(request: Request) {
     const ordersForRules = orders.map((o) => ({
       id: o.id, postcode: o.postcode, area: o.area, weight: o.weight,
       customer: o.customer, notes: o.notes, reference: o.reference,
-      deliveryTime: o.deliveryTime, scheduledDay: o.scheduledDay,
-      priority: o.priority, depot: o.depot,
+      deliveryTime: o.deliveryTime, specialInstructions: o.specialInstructions,
+      scheduledDay: o.scheduledDay, priority: o.priority, depot: o.depot,
     }))
     const routeWeightLimit = getRouteWeightLimit(parsedRules, ordersForRules)
     const minTruckLoadPct = getMinTruckLoadPct(parsedRules, ordersForRules)
@@ -165,6 +172,12 @@ export async function POST(request: Request) {
     // rule fully overrides the built-in 9h default — including loosening it —
     // because the dispatcher is the one who knows what's compliant for their drivers.
     const maxWorkingDayMin = ruleMaxRouteTime ?? MAX_WORKING_DAY_MIN
+
+    // When the first run leaves the depot — the anchor for ETAs and therefore
+    // for whether AM / "before 10" windows can be met.
+    const startSetting = await prisma.setting.findUnique({ where: { key: 'ROUTE_START_TIME' } })
+    const dayStartMin = clockToMinutes(startSetting?.value) ?? DEFAULT_DAY_START_MIN
+    const dayMidnightMs = new Date(date + 'T00:00:00.000Z').getTime()
 
     const depotKeys: (string | null)[] = depot
       ? [depot]
@@ -273,12 +286,19 @@ export async function POST(request: Request) {
 
       if (inAreaOrders.length === 0) continue
 
-      const stops = inAreaOrders.map((o) => ({
-        id: o.id, lat: o.lat!, lng: o.lng!, weight: o.weight,
-        customer: o.customer, postcode: o.postcode, address: o.address,
-        deliveryTime: o.deliveryTime, priority: o.priority,
-        preferredTruckType: o.preferredTruckType ?? null,
-      }))
+      const stops: Stop[] = inAreaOrders.map((o) => {
+        const window = effectiveWindow(o)
+        const flags = parseFlags(o.instructionFlags)
+        return {
+          id: o.id, lat: o.lat!, lng: o.lng!, weight: o.weight,
+          customer: o.customer, postcode: o.postcode, address: o.address,
+          deliveryTime: o.deliveryTime, priority: o.priority,
+          preferredTruckType: o.preferredTruckType ?? null,
+          windowStart: window.start,
+          windowEnd: window.end,
+          pin: flags.includes('first_drop') ? 'first' : flags.includes('last_drop') ? 'last' : null,
+        }
+      })
 
       const totalWeight = stops.reduce((s, st) => s + st.weight, 0)
 
@@ -294,6 +314,8 @@ export async function POST(request: Request) {
         assignment: TruckAssignment
         orderedStops: Stop[]
         routeDetails: RouteResult | null
+        startMin: number
+        schedule: Schedule | null
       }
 
       const noDoubleRunTruckIds = new Set<string>()
@@ -340,13 +362,30 @@ export async function POST(request: Request) {
         }
 
         candidates = []
-        for (const assignment of assignments) {
-          const orderedStops = await osrmTripOptimize(depotLocation, assignment.stops, optimizeStopOrder)
+        // Runs in order so a truck's Run 2 starts when its Run 1 gets back —
+        // otherwise Run 2's ETAs (and its AM/PM windows) would be fiction.
+        const truckFreeAt = new Map<string, number>()
+        const byRun = [...assignments].sort((a, b) => a.runNumber - b.runNumber)
+        for (const assignment of byRun) {
+          const startMin = truckFreeAt.get(assignment.truckId) ?? dayStartMin
+          let orderedStops = await osrmTripOptimize(depotLocation, assignment.stops, optimizeStopOrder)
+          if (hasTimeConstraints(orderedStops)) {
+            const points = [depotLocation, ...orderedStops]
+            const matrix = (await osrmDurationMatrix(points)) ?? estimateDurationMatrix(points)
+            orderedStops = sequenceForTimeWindows(orderedStops, matrix, startMin)
+          }
           let routeDetails: RouteResult | null = null
           if (orderedStops.length > 0) {
             routeDetails = await getRouteDetails(depotLocation, depotLocation, orderedStops)
           }
-          candidates.push({ assignment, orderedStops, routeDetails })
+          const schedule = routeDetails
+            ? computeStopSchedule(orderedStops, routeDetails.legs.map((l) => l.duration), startMin)
+            : null
+          truckFreeAt.set(
+            assignment.truckId,
+            schedule ? schedule.endMin : startMin + computeRunTime(0, orderedStops.length).totalMin
+          )
+          candidates.push({ assignment, orderedStops, routeDetails, startMin, schedule })
         }
 
         // Working-day check. The total time a driver is out (drive + drops + break)
@@ -364,7 +403,7 @@ export async function POST(request: Request) {
         }
 
         const runTime = (c: Candidate) =>
-          computeRunTime(c.routeDetails?.totalDuration ?? 0, c.orderedStops.length).totalMin
+          computeRunTime(c.routeDetails?.totalDuration ?? 0, c.orderedStops.length, c.schedule?.waitMin ?? 0).totalMin
 
         const newlyProhibited: string[] = []
         let overflowSingleRun = false
@@ -398,7 +437,7 @@ export async function POST(request: Request) {
       }
 
       // Phase 3: persist routes + stops.
-      for (const { assignment, orderedStops, routeDetails } of candidates) {
+      for (const { assignment, orderedStops, routeDetails, startMin, schedule } of candidates) {
         const dayLabel = day.charAt(0).toUpperCase() + day.slice(1)
         const runSuffix = assignment.isExtraVan
           ? ''
@@ -411,8 +450,20 @@ export async function POST(request: Request) {
         // drivingDuration stores the OSRM driving-only portion for the breakdown UI.
         const drivingMin = routeDetails?.totalDuration ?? null
         const workingDayMin = drivingMin !== null
-          ? computeRunTime(drivingMin, orderedStops.length).totalMin
+          ? computeRunTime(drivingMin, orderedStops.length, schedule?.waitMin ?? 0).totalMin
           : null
+
+        // Surface any delivery windows we still couldn't hit (too many AM drops
+        // for one vehicle, a far-flung "before 9" etc.) so the dispatcher can
+        // move stops by hand rather than discover it from the customer.
+        schedule?.stops.forEach((t, idx) => {
+          if (t.lateMin <= 0) return
+          const stop = orderedStops[idx]
+          errors.push(
+            `${routeName}: ${stop.customer} (${stop.postcode}) ETA ${formatClock(t.serviceStartMin)} misses its window ` +
+            `(due by ${formatClock(stop.windowEnd!)}, ${Math.round(t.lateMin)} min late).`
+          )
+        })
 
         const route = await prisma.route.create({
           data: {
@@ -424,6 +475,7 @@ export async function POST(request: Request) {
             totalDistance: routeDetails?.totalDistance ?? null,
             totalDuration: workingDayMin,
             drivingDuration: drivingMin,
+            startTime: startMin,
             depot: depotKey ?? null,
           },
         })
@@ -432,6 +484,7 @@ export async function POST(request: Request) {
           for (let idx = 0; idx < orderedStops.length; idx++) {
             const stop = orderedStops[idx]
             const leg = routeDetails?.legs[idx]
+            const timing = schedule?.stops[idx]
             await tx.routeStop.create({
               data: {
                 routeId: route.id,
@@ -440,6 +493,11 @@ export async function POST(request: Request) {
                 sequence: idx + 1,
                 duration: leg?.duration ?? null,
                 distance: leg?.distance ?? null,
+                // ETAs are stored as wall-clock-in-UTC, same convention as Route.date.
+                eta: timing ? new Date(dayMidnightMs + Math.round(timing.serviceStartMin) * 60_000) : null,
+                notes: timing && timing.lateMin > 0
+                  ? `Misses window: ETA ${formatClock(timing.serviceStartMin)}, due by ${formatClock(stop.windowEnd!)}`
+                  : null,
               },
             })
           }

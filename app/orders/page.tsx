@@ -4,11 +4,18 @@ import { useEffect, useState, useCallback, useRef } from 'react'
 import { PageHeader } from '@/components/ui/PageHeader'
 import { Button } from '@/components/ui/Button'
 import { Modal } from '@/components/ui/Modal'
-import { Input, Select } from '@/components/ui/Input'
+import { Input, Select, TextArea } from '@/components/ui/Input'
 import { statusBadge } from '@/components/ui/Badge'
 import { formatWeight, haversineDistance } from '@/lib/utils'
 import { PALLET_NETWORK_WARNING_KM } from '@/lib/route-optimizer'
 import { useToast } from '@/components/ui/Toast'
+import { InstructionChips } from '@/components/ui/InstructionChips'
+import {
+  parseSpecialInstructions,
+  formatClock,
+  clockToMinutes,
+  parseFlags,
+} from '@/lib/special-instructions'
 import { Upload, Plus, Trash2, Search, RefreshCw, Pencil, RotateCcw, AlertTriangle } from 'lucide-react'
 import Papa from 'papaparse'
 import * as XLSX from 'xlsx'
@@ -25,6 +32,10 @@ interface Order {
   status: string
   scheduledDay: string | null
   deliveryTime: string | null
+  specialInstructions: string | null
+  windowStart: number | null
+  windowEnd: number | null
+  instructionFlags: string | null
   lat: number | null
   lng: number | null
   priority: number
@@ -135,7 +146,8 @@ export default function OrdersPage() {
       if (fileRef.current) fileRef.current.value = ''
       pushToast({
         title: 'Import complete',
-        message: `Imported ${data.imported} orders, Geocoded: ${data.geocoded}`,
+        message: `Imported ${data.imported} orders, Geocoded: ${data.geocoded}` +
+          (data.withInstructions ? `, ${data.withInstructions} with special instructions (${data.timeWindows} timed)` : ''),
         variant: 'success',
       })
       fetchOrders()
@@ -323,6 +335,7 @@ export default function OrdersPage() {
               <th>Area</th>
               <th>Weight</th>
               <th>Day</th>
+              <th>Instructions</th>
               <th>Status</th>
               <th>Geocoded</th>
               <th className="w-10"></th>
@@ -330,11 +343,11 @@ export default function OrdersPage() {
           </thead>
           <tbody>
             {loading && (
-              <tr><td colSpan={10} className="text-center py-8 text-gray-400">Loading...</td></tr>
+              <tr><td colSpan={11} className="text-center py-8 text-gray-400">Loading...</td></tr>
             )}
             {!loading && orders.length === 0 && (
               <tr>
-                <td colSpan={10} className="text-center py-12 text-gray-400">
+                <td colSpan={11} className="text-center py-12 text-gray-400">
                   No orders found. Click <strong>Import CSV / Excel</strong> to get started.
                 </td>
               </tr>
@@ -374,6 +387,15 @@ export default function OrdersPage() {
                   <td className="text-gray-500">{order.area ?? '—'}</td>
                   <td>{formatWeight(order.weight)}</td>
                   <td className="capitalize text-gray-600">{order.scheduledDay ?? '—'}</td>
+                  <td className="max-w-xs" title={order.specialInstructions ?? undefined}>
+                    <InstructionChips order={order} />
+                    {order.specialInstructions && (
+                      <div className="text-xs text-gray-500 truncate mt-0.5">{order.specialInstructions}</div>
+                    )}
+                    {!order.specialInstructions && !order.deliveryTime && order.windowStart == null && order.windowEnd == null && (
+                      <span className="text-gray-300">—</span>
+                    )}
+                  </td>
                   <td>
                     {(order.status === 'pending' || order.status === 'pallet_network') ? (
                       <select
@@ -428,9 +450,14 @@ export default function OrdersPage() {
             <p className="font-medium text-gray-800 mb-2">Accepted file formats: CSV or Excel (.xlsx)</p>
             <p>Your file should have columns like:</p>
             <code className="block mt-2 bg-white p-2 rounded border text-xs">
-              Customer, Postcode, Weight (kg), Reference, Address, Notes, Area, Delivery Time
+              Customer, Postcode, Weight (kg), Reference, Address, Notes, Area, Delivery Time, Special Instructions
             </code>
             <p className="mt-2 text-xs text-gray-500">Column names are flexible — the system will recognise common variants.</p>
+            <p className="mt-2 text-xs text-gray-500">
+              <strong>Special Instructions</strong> are read for delivery windows (AM, PM, &ldquo;before 10&rdquo;, &ldquo;between 9 and 11&rdquo;),
+              first/last drop, day restrictions (&ldquo;closed Fridays&rdquo;) and handling notes (tail lift, no HGV, call ahead).
+              Windows are honoured when routes are generated.
+            </p>
           </div>
 
           <div
@@ -488,13 +515,34 @@ export default function OrdersPage() {
 function EditOrderModal({ order, depots, onClose, onSaved }: { order: Order; depots: Depot[]; onClose: () => void; onSaved: () => void }) {
   const [form, setForm] = useState({ ...order, weight: String(order.weight), priority: String(order.priority ?? 0) })
   const [saving, setSaving] = useState(false)
+  const [instructionWarnings, setInstructionWarnings] = useState<string[]>([])
+
+  // Editing the instructions re-reads them, same as the importer does. The
+  // window fields stay editable afterwards for anything the parser misses.
+  const handleInstructionsChange = (text: string) => {
+    const parsed = parseSpecialInstructions(text)
+    setInstructionWarnings(parsed.warnings)
+    setForm({
+      ...form,
+      specialInstructions: text,
+      deliveryTime: parsed.deliveryTime ?? form.deliveryTime,
+      windowStart: parsed.windowStart,
+      windowEnd: parsed.windowEnd,
+      instructionFlags: parsed.flags.length > 0 ? parsed.flags.join(',') : null,
+    })
+  }
 
   const handleSave = async () => {
     setSaving(true)
     await fetch(`/api/orders/${order.id}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...form, weight: parseFloat(form.weight) || 0, priority: parseInt(form.priority) || 0 }),
+      body: JSON.stringify({
+        ...form,
+        weight: parseFloat(form.weight) || 0,
+        priority: parseInt(form.priority) || 0,
+        specialInstructions: form.specialInstructions?.trim() || null,
+      }),
     })
     setSaving(false)
     onSaved()
@@ -533,6 +581,38 @@ function EditOrderModal({ order, depots, onClose, onSaved }: { order: Order; dep
           />
         </div>
         <Input label="Notes" value={form.notes ?? ''} onChange={(e) => setForm({ ...form, notes: e.target.value })} />
+        <TextArea
+          label="Special Instructions"
+          rows={2}
+          value={form.specialInstructions ?? ''}
+          onChange={(e) => handleInstructionsChange(e.target.value)}
+          placeholder="e.g. AM only, tail lift required, call 30 mins before"
+        />
+        <div className="grid grid-cols-2 gap-4">
+          <Input
+            label="Deliver no earlier than"
+            type="time"
+            value={form.windowStart != null ? formatClock(form.windowStart) : ''}
+            onChange={(e) => setForm({ ...form, windowStart: clockToMinutes(e.target.value) })}
+          />
+          <Input
+            label="Deliver no later than"
+            type="time"
+            value={form.windowEnd != null ? formatClock(form.windowEnd) : ''}
+            onChange={(e) => setForm({ ...form, windowEnd: clockToMinutes(e.target.value) })}
+          />
+        </div>
+        {(parseFlags(form.instructionFlags).length > 0 || instructionWarnings.length > 0) && (
+          <div className="space-y-1">
+            <InstructionChips order={{ instructionFlags: form.instructionFlags }} />
+            {instructionWarnings.map((w) => (
+              <p key={w} className="text-xs text-amber-600">{w}</p>
+            ))}
+          </div>
+        )}
+        <p className="text-xs text-gray-400 -mt-2">
+          Windows are read from the instructions automatically; AM / PM above also counts as before / after 12:00.
+        </p>
         {depots.length > 0 && (
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Depot</label>

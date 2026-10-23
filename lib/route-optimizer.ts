@@ -11,6 +11,11 @@ export interface Stop {
   deliveryTime?: string | null
   priority: number
   preferredTruckType?: string | null
+  /** Effective delivery window, minutes after midnight (see effectiveWindow()). */
+  windowStart?: number | null
+  windowEnd?: number | null
+  /** "First drop" / "last drop" from special instructions. */
+  pin?: 'first' | 'last' | null
 }
 
 export interface TruckSlot {
@@ -71,14 +76,190 @@ export interface RunTime {
   drivingMin: number
   serviceMin: number
   breakMin: number
+  waitMin: number
   totalMin: number
 }
 
-/** Total working time for a run given OSRM driving minutes and the stop count. */
-export function computeRunTime(drivingMin: number, stopCount: number): RunTime {
+/**
+ * Total working time for a run given OSRM driving minutes and the stop count.
+ * waitMin is time spent parked outside a site waiting for its delivery window
+ * to open ("not before 10") — it still counts against the driver's day.
+ */
+export function computeRunTime(drivingMin: number, stopCount: number, waitMin = 0): RunTime {
   const serviceMin = stopCount * SERVICE_TIME_PER_DROP_MIN
   const breakMin = drivingMin >= BREAK_AFTER_DRIVE_MIN ? BREAK_MIN : 0
-  return { drivingMin, serviceMin, breakMin, totalMin: drivingMin + serviceMin + breakMin }
+  return { drivingMin, serviceMin, breakMin, waitMin, totalMin: drivingMin + serviceMin + breakMin + waitMin }
+}
+
+/** Default time the first run leaves the depot (minutes after midnight). Overridden by the ROUTE_START_TIME setting. */
+export const DEFAULT_DAY_START_MIN = 8 * 60
+
+export interface StopTiming {
+  /** When the vehicle reaches the site. */
+  arrivalMin: number
+  /** When unloading starts — later than arrival if the window hasn't opened yet. */
+  serviceStartMin: number
+  waitMin: number
+  /** Minutes past the stop's windowEnd (0 = on time). */
+  lateMin: number
+}
+
+export interface Schedule {
+  stops: StopTiming[]
+  /** Back at the depot. */
+  endMin: number
+  drivingMin: number
+  waitMin: number
+  lateMin: number
+  lateCount: number
+}
+
+/**
+ * Walk a sequenced run clock-forward from startMin. legMin(i) is the drive
+ * into position i (legMin(0) = depot → first stop) and legMin(n) the drive
+ * home. Mirrors computeRunTime(): 15 min per drop, and the one 45 min break
+ * is taken on the leg where cumulative driving reaches 4h30.
+ */
+function walkSchedule(stops: Stop[], legMin: (i: number) => number, startMin: number): Schedule {
+  let clock = startMin
+  let drivingMin = 0
+  let breakTaken = false
+  let waitMin = 0
+  let lateMin = 0
+  let lateCount = 0
+  const timings: StopTiming[] = []
+
+  const drive = (leg: number) => {
+    drivingMin += leg
+    clock += leg
+    if (!breakTaken && drivingMin >= BREAK_AFTER_DRIVE_MIN) {
+      clock += BREAK_MIN
+      breakTaken = true
+    }
+  }
+
+  for (let i = 0; i < stops.length; i++) {
+    drive(legMin(i))
+    const s = stops[i]
+    const arrivalMin = clock
+    const serviceStartMin = s.windowStart != null ? Math.max(arrivalMin, s.windowStart) : arrivalMin
+    const wait = serviceStartMin - arrivalMin
+    const late = s.windowEnd != null ? Math.max(0, serviceStartMin - s.windowEnd) : 0
+    waitMin += wait
+    lateMin += late
+    if (late > 0) lateCount++
+    timings.push({ arrivalMin, serviceStartMin, waitMin: wait, lateMin: late })
+    clock = serviceStartMin + SERVICE_TIME_PER_DROP_MIN
+  }
+  drive(legMin(stops.length))
+
+  return { stops: timings, endMin: clock, drivingMin, waitMin, lateMin, lateCount }
+}
+
+/**
+ * ETAs for a run from OSRM leg durations (getRouteDetails().legs — one per
+ * stop plus the leg home). Used for the persisted RouteStop.eta values and
+ * the late-window warnings.
+ */
+export function computeStopSchedule(stops: Stop[], legDurations: number[], startMin: number): Schedule {
+  return walkSchedule(stops, (i) => legDurations[i] ?? 0, startMin)
+}
+
+export function hasTimeConstraints(stops: Stop[]): boolean {
+  return stops.some((s) => s.windowStart != null || s.windowEnd != null || s.pin)
+}
+
+/** Straight-line drive-time matrix (minutes), used when the OSRM table call fails. Index 0 = depot. */
+export function estimateDurationMatrix(points: { lat: number; lng: number }[]): number[][] {
+  return points.map((a) =>
+    points.map((b) => estimateDriveMinFromKm(haversineDistance(a.lat, a.lng, b.lat, b.lng)))
+  )
+}
+
+const LATE_PENALTY_PER_MIN = 100 // a minute late outweighs any plausible detour
+const PIN_PENALTY = 100000
+
+/**
+ * Re-sequence one run so delivery windows and first/last-drop pins are met.
+ *
+ * OSRM's trip service only minimises distance, so an "AM only" stop can land
+ * at 14:00 on the far end of the loop. When a run has no constraints we keep
+ * the OSRM order untouched. Otherwise we search for the order that gets the
+ * vehicle home soonest (driving + waiting) with a heavy penalty per minute
+ * late and per broken pin:
+ *  - two seeds: the OSRM order, and a constraint-first order (pins, then
+ *    deadlines by time, then anytime stops, then "after X" stops);
+ *  - each improved by relocate + 2-opt moves until no move helps.
+ * matrix[i][j] = drive minutes, index 0 = depot, i + 1 = stops[i].
+ */
+export function sequenceForTimeWindows(stops: Stop[], matrix: number[][], startMin: number): Stop[] {
+  if (stops.length <= 1 || !hasTimeConstraints(stops)) return stops
+
+  const n = stops.length
+  const matrixIdx = new Map(stops.map((s, i) => [s.id, i + 1]))
+  const firstCount = stops.filter((s) => s.pin === 'first').length
+  const lastCount = stops.filter((s) => s.pin === 'last').length
+
+  const cost = (seq: Stop[]): number => {
+    const at = (i: number) => (i < 0 || i >= n ? 0 : matrixIdx.get(seq[i].id)!)
+    const sched = walkSchedule(seq, (i) => matrix[at(i - 1)][at(i)], startMin)
+    let pinViolations = 0
+    seq.forEach((s, i) => {
+      if (s.pin === 'first' && i >= firstCount) pinViolations++
+      if (s.pin === 'last' && i < n - lastCount) pinViolations++
+    })
+    return (sched.endMin - startMin) + sched.lateMin * LATE_PENALTY_PER_MIN + pinViolations * PIN_PENALTY
+  }
+
+  const improve = (seed: Stop[]): { seq: Stop[]; cost: number } => {
+    let best = seed
+    let bestCost = cost(seed)
+    let improved = true
+    let passes = 0
+    while (improved && passes++ < 50) {
+      improved = false
+      // Relocate: lift one stop out and drop it in every other position.
+      for (let i = 0; i < n; i++) {
+        for (let j = 0; j < n; j++) {
+          if (i === j) continue
+          const cand = [...best]
+          const [moved] = cand.splice(i, 1)
+          cand.splice(j, 0, moved)
+          const c = cost(cand)
+          if (c < bestCost - 1e-6) { best = cand; bestCost = c; improved = true }
+        }
+      }
+      // 2-opt: reverse a segment.
+      for (let i = 0; i < n - 1; i++) {
+        for (let j = i + 1; j < n; j++) {
+          const cand = [...best.slice(0, i), ...best.slice(i, j + 1).reverse(), ...best.slice(j + 1)]
+          const c = cost(cand)
+          if (c < bestCost - 1e-6) { best = cand; bestCost = c; improved = true }
+        }
+      }
+    }
+    return { seq: best, cost: bestCost }
+  }
+
+  const group = (s: Stop) =>
+    s.pin === 'first' ? 0
+      : s.pin === 'last' ? 4
+        : s.windowEnd != null ? 1
+          : s.windowStart != null ? 3
+            : 2
+  const constraintFirst = stops
+    .map((s, i) => ({ s, i }))
+    .sort((a, b) =>
+      group(a.s) - group(b.s) ||
+      (a.s.windowEnd ?? 0) - (b.s.windowEnd ?? 0) ||
+      (a.s.windowStart ?? 0) - (b.s.windowStart ?? 0) ||
+      a.i - b.i
+    )
+    .map((x) => x.s)
+
+  const fromOsrm = improve(stops)
+  const fromConstraints = improve(constraintFirst)
+  return fromConstraints.cost < fromOsrm.cost ? fromConstraints.seq : fromOsrm.seq
 }
 
 /**
@@ -515,11 +696,15 @@ export function assignToTrucks(
     //       other run of the same truck has already been assigned a cluster nearby
     //   - capacity wasted (rough tie-breaker for packing)
     const londonStops = londonStopCount(cluster)
+    // Stops with a deadline ("AM", "before 10", first drop) can't sensibly go
+    // on a second run that only leaves the depot after Run 1 is back.
+    const deadlineStops = cluster.filter((s) => s.windowEnd != null || s.pin === 'first').length
     const scoreSlot = (i: number): number => {
       const slot = activeSlots[i]
       let score = 0
       score += preferredTypeScore(cluster, slot.type) * 1000
       if (slot.isExtraVan) score += londonStops * 75
+      if (slot.runNumber > 1) score -= deadlineStops * 200
       for (let j = 0; j < activeSlots.length; j++) {
         if (j === i) continue
         if (!usedSlotIdx.has(j)) continue

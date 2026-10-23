@@ -37,6 +37,7 @@ const CONDITION_FIELDS = [
   { value: 'customer', label: 'Customer Name' },
   { value: 'weight', label: 'Weight (kg)' },
   { value: 'notes', label: 'Notes' },
+  { value: 'specialInstructions', label: 'Special Instructions' },
   { value: 'reference', label: 'Reference' },
   { value: 'depot', label: 'Depot' },
 ]

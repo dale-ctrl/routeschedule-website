@@ -1,6 +1,7 @@
 import { prisma } from '@/lib/prisma'
 import { getRouteDetails } from '@/lib/routing'
-import { computeRunTime } from '@/lib/route-optimizer'
+import { computeRunTime, computeStopSchedule, DEFAULT_DAY_START_MIN } from '@/lib/route-optimizer'
+import { effectiveWindow, clockToMinutes, formatClock } from '@/lib/special-instructions'
 
 /**
  * Remove one stop from a route. The order goes back to 'pending' (so it can
@@ -76,7 +77,13 @@ export async function DELETE(
     let drivingMin: number | null = null
     let totalDistance: number | null = null
     let workingDayMin: number | null = null
-    const legUpdates: { id: string; duration: number | null; distance: number | null }[] = []
+    const legUpdates: {
+      id: string
+      duration: number | null
+      distance: number | null
+      eta: Date | null
+      notes: string | null
+    }[] = []
 
     if (depotLocation && geocodedStops.length > 0) {
       const waypoints = geocodedStops.map((s) => ({ lat: s.order.lat!, lng: s.order.lng! }))
@@ -84,9 +91,39 @@ export async function DELETE(
       if (details) {
         drivingMin = details.totalDuration
         totalDistance = details.totalDistance
-        workingDayMin = computeRunTime(drivingMin, remaining.length).totalMin
-        details.legs.forEach((leg, i) => {
-          legUpdates.push({ id: geocodedStops[i].id, duration: leg.duration, distance: leg.distance })
+
+        // Recompute ETAs from the run's original departure time — removing a
+        // stop can pull later drops earlier (and fix or reveal window misses).
+        let startMin = route.startTime
+        if (startMin == null) {
+          const setting = await prisma.setting.findUnique({ where: { key: 'ROUTE_START_TIME' } })
+          startMin = clockToMinutes(setting?.value) ?? DEFAULT_DAY_START_MIN
+        }
+        const scheduleStops = geocodedStops.map((s) => {
+          const w = effectiveWindow(s.order)
+          return {
+            id: s.id, lat: s.order.lat!, lng: s.order.lng!, weight: s.order.weight,
+            customer: s.order.customer, postcode: s.order.postcode, priority: s.order.priority,
+            windowStart: w.start, windowEnd: w.end,
+          }
+        })
+        const schedule = computeStopSchedule(scheduleStops, details.legs.map((l) => l.duration), startMin)
+        const midnightMs = new Date(route.date.toISOString().slice(0, 10) + 'T00:00:00.000Z').getTime()
+
+        workingDayMin = computeRunTime(drivingMin, remaining.length, schedule.waitMin).totalMin
+        geocodedStops.forEach((s, i) => {
+          const leg = details.legs[i]
+          const timing = schedule.stops[i]
+          const windowEnd = scheduleStops[i].windowEnd
+          legUpdates.push({
+            id: s.id,
+            duration: leg.duration,
+            distance: leg.distance,
+            eta: new Date(midnightMs + Math.round(timing.serviceStartMin) * 60_000),
+            notes: timing.lateMin > 0 && windowEnd != null
+              ? `Misses window: ETA ${formatClock(timing.serviceStartMin)}, due by ${formatClock(windowEnd)}`
+              : null,
+          })
         })
       }
     }
@@ -104,7 +141,7 @@ export async function DELETE(
       ...legUpdates.map((u) =>
         prisma.routeStop.update({
           where: { id: u.id },
-          data: { duration: u.duration, distance: u.distance },
+          data: { duration: u.duration, distance: u.distance, eta: u.eta, notes: u.notes },
         })
       ),
     ])

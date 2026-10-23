@@ -41,6 +41,10 @@ model Order {
   deliveryDate DateTime?   // exact date sales tagged the order with (BKG_START)
   importBatch  String?
   deliveryTime String?
+  specialInstructions String?   // raw "Special Instructions" text from the BKG export
+  windowStart  Int?        // earliest delivery, minutes after midnight (parsed from instructions or set by hand)
+  windowEnd    Int?        // latest delivery, minutes after midnight
+  instructionFlags String?  // comma-separated codes, e.g. "first_drop,tail_lift" (lib/special-instructions.ts)
   priority          Int         @default(0)
   depot             String?
   preferredTruckType String?
@@ -60,6 +64,7 @@ model Route {
   totalDistance Float?
   totalDuration Int?        // total working-day minutes: driving + drops + break
   drivingDuration Int?      // OSRM driving-only minutes (subset of totalDuration)
+  startTime     Int?        // minutes after midnight the run leaves the depot (Run 2 starts when Run 1 ends)
   notes         String?
   depot         String?
   createdAt     DateTime    @default(now())

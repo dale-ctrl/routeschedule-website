@@ -185,6 +185,31 @@ export async function osrmTripOptimize<T extends { lat: number; lng: number }>(
   }
 }
 
+/**
+ * Road drive-time matrix (minutes) between every pair of points via OSRM's
+ * Table service — used to sequence runs with delivery windows, where we need
+ * real arrival times rather than straight-line distance. Returns null on any
+ * failure (or a gap in the matrix) so the caller can fall back to estimates.
+ */
+export async function osrmDurationMatrix(
+  points: { lat: number; lng: number }[]
+): Promise<number[][] | null> {
+  if (points.length < 2) return null
+  try {
+    const coords = points.map((p) => `${p.lng},${p.lat}`).join(';')
+    const res = await fetch(`https://router.project-osrm.org/table/v1/driving/${coords}?annotations=duration`)
+    if (!res.ok) throw new Error(`OSRM table HTTP ${res.status}`)
+    const data = await res.json()
+    if (data.code !== 'Ok' || !Array.isArray(data.durations)) throw new Error(`OSRM table failed: ${data.code}`)
+    const matrix = (data.durations as (number | null)[][]).map((row) => row.map((sec) => (sec == null ? NaN : sec / 60)))
+    if (matrix.some((row) => row.some((v) => Number.isNaN(v)))) throw new Error('OSRM table has unroutable pairs')
+    return matrix
+  } catch (err) {
+    console.warn('[OSRM table] Falling back to estimated drive times:', String(err))
+    return null
+  }
+}
+
 export interface RouteResult {
   totalDuration: number // minutes
   totalDistance: number // km

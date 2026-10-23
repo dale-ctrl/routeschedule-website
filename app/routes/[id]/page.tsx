@@ -12,7 +12,9 @@ import {
   BREAK_MIN,
   BREAK_AFTER_DRIVE_MIN,
 } from '@/lib/route-optimizer'
-import { ArrowLeft, MapPin, Clock, Weight, Truck as TruckIcon, X } from 'lucide-react'
+import { InstructionChips } from '@/components/ui/InstructionChips'
+import { windowLabel, formatClock } from '@/lib/special-instructions'
+import { ArrowLeft, MapPin, Clock, Weight, Truck as TruckIcon, X, AlertTriangle } from 'lucide-react'
 import Link from 'next/link'
 import { format } from 'date-fns'
 
@@ -27,6 +29,8 @@ interface Stop {
   sequence: number
   duration: number | null
   distance: number | null
+  eta: string | null
+  notes: string | null
   order: {
     id: string
     customer: string
@@ -34,6 +38,10 @@ interface Stop {
     address: string | null
     weight: number
     deliveryTime: string | null
+    specialInstructions: string | null
+    windowStart: number | null
+    windowEnd: number | null
+    instructionFlags: string | null
     notes: string | null
     lat: number | null
     lng: number | null
@@ -49,6 +57,7 @@ interface RouteDetail {
   totalDistance: number | null
   totalDuration: number | null
   drivingDuration: number | null
+  startTime: number | null
   notes: string | null
   truck: {
     id: string
@@ -145,7 +154,7 @@ export default function RouteDetailPage({ params }: { params: Promise<{ id: stri
             icon={<Clock size={18} className="text-orange-500" />}
             label="Working day"
             value={route.totalDuration ? formatDuration(route.totalDuration) : '—'}
-            sub={renderTimeBreakdown(route.drivingDuration, route.stops.length) ?? (statusBadge(route.status) as unknown as string)}
+            sub={renderTimeBreakdown(route.drivingDuration, route.stops.length, route.totalDuration, route.startTime) ?? (statusBadge(route.status) as unknown as string)}
           />
         </div>
 
@@ -163,7 +172,8 @@ export default function RouteDetailPage({ params }: { params: Promise<{ id: stri
                     <th>Customer</th>
                     <th>Postcode</th>
                     <th>Weight</th>
-                    <th>Time</th>
+                    <th>Window</th>
+                    <th>ETA</th>
                     <th>Drive</th>
                     <th className="w-10"></th>
                   </tr>
@@ -174,11 +184,26 @@ export default function RouteDetailPage({ params }: { params: Promise<{ id: stri
                       <td className="text-gray-400 font-mono text-xs">{stop.sequence}</td>
                       <td>
                         <div className="font-medium text-gray-900 text-sm">{stop.order.customer}</div>
+                        {stop.order.specialInstructions && (
+                          <div className="text-xs text-gray-600 mt-0.5">{stop.order.specialInstructions}</div>
+                        )}
+                        <InstructionChips order={{ instructionFlags: stop.order.instructionFlags }} className="mt-1" />
                         {stop.order.notes && <div className="text-xs text-gray-400">{stop.order.notes}</div>}
                       </td>
                       <td className="font-mono text-sm">{stop.order.postcode}</td>
                       <td className="text-sm">{formatWeight(stop.order.weight)}</td>
-                      <td className="text-xs text-gray-500 capitalize">{stop.order.deliveryTime ?? '—'}</td>
+                      <td className="text-xs text-gray-500 whitespace-nowrap">{windowLabel(stop.order) ?? '—'}</td>
+                      <td className="text-xs whitespace-nowrap">
+                        {stop.eta ? (
+                          <span
+                            className={stop.notes ? 'text-red-600 font-medium inline-flex items-center gap-1' : 'text-gray-700'}
+                            title={stop.notes ?? undefined}
+                          >
+                            {stop.notes && <AlertTriangle size={12} />}
+                            {formatUtcClock(stop.eta)}
+                          </span>
+                        ) : '—'}
+                      </td>
                       <td className="text-xs text-gray-500">{stop.duration ? formatDuration(stop.duration) : '—'}</td>
                       <td>
                         <button
@@ -221,16 +246,31 @@ export default function RouteDetailPage({ params }: { params: Promise<{ id: stri
  * Renders the driving / drops / break breakdown that adds up to the working-day total.
  * Returns null when we don't have driving time (older routes) so the caller can fall back.
  */
-function renderTimeBreakdown(drivingMin: number | null, stopCount: number): string | null {
+function renderTimeBreakdown(
+  drivingMin: number | null,
+  stopCount: number,
+  totalMin: number | null,
+  startMin: number | null
+): string | null {
   if (drivingMin === null || drivingMin === undefined) return null
   const service = stopCount * SERVICE_TIME_PER_DROP_MIN
   const brk = drivingMin >= BREAK_AFTER_DRIVE_MIN ? BREAK_MIN : 0
+  // Whatever's left of the working day is time parked waiting for delivery windows to open.
+  const wait = totalMin != null ? Math.max(0, totalMin - drivingMin - service - brk) : 0
   const parts = [
     `Drive ${formatDuration(drivingMin)}`,
     `${stopCount} drops ${formatDuration(service)}`,
   ]
   if (brk > 0) parts.push(`Break ${formatDuration(brk)}`)
+  if (wait > 0) parts.push(`Waiting ${formatDuration(wait)}`)
+  if (startMin != null) parts.push(`Departs ${formatClock(startMin)}`)
   return parts.join(' · ')
+}
+
+/** ETAs are stored as wall-clock-in-UTC (same convention as Route.date), so read them back in UTC. */
+function formatUtcClock(iso: string): string {
+  const d = new Date(iso)
+  return formatClock(d.getUTCHours() * 60 + d.getUTCMinutes())
 }
 
 function SummaryCard({ icon, label, value, sub }: { icon: React.ReactNode; label: string; value: string | React.ReactNode; sub: string | React.ReactNode }) {

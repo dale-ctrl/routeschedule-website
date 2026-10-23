@@ -35,6 +35,7 @@ export async function applyAIRules(
     notes: o.notes ?? null,
     reference: o.reference ?? null,
     deliveryTime: o.deliveryTime ?? null,
+    specialInstructions: o.specialInstructions ?? null,
     depot: o.depot ?? null,
     scheduledDay: o.scheduledDay ?? null,
   }))

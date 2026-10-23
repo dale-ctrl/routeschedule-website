@@ -22,6 +22,7 @@ export async function GET(request: Request) {
             { postcode: { contains: search } },
             { reference: { contains: search } },
             { area: { contains: search } },
+            { specialInstructions: { contains: search } },
           ],
         }
       : {}),
@@ -85,6 +86,7 @@ export async function DELETE(request: Request) {
               { postcode: { contains: search } },
               { reference: { contains: search } },
               { area: { contains: search } },
+              { specialInstructions: { contains: search } },
             ],
           }
         : {}),

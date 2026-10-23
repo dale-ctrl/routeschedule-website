@@ -7,6 +7,7 @@ import {
   type DepotLocation,
 } from '@/lib/route-optimizer'
 import { haversineDistance } from '@/lib/utils'
+import { parseSpecialInstructions, type ParsedInstructions } from '@/lib/special-instructions'
 
 export async function POST(request: Request) {
   try {
@@ -104,6 +105,10 @@ export async function POST(request: Request) {
       // ("19/05/2026 9:30 AM"). Probe it for AM/PM AND fall back to dedicated
       // time columns if BKG_START is date-only.
       const timeSource = get(r, 'bkg_start', 'delivery time', 'deliverytime', 'time', 'am/pm', 'window', 'slot')
+      const specialInstructions = str(get(r, 'special instructions', 'special instruction', 'delivery instructions', 'instructions'))
+      // Special instructions are the most specific source for timing ("AM only",
+      // "before 10") so they win over whatever BKG_START's timestamp implies.
+      const instructions = parseSpecialInstructions(specialInstructions)
       return {
         id: '',
         reference: str(get(r, 'bgk_user_char1', 'bkg_user_char1', 'reference', 'ref', 'order ref', 'order number', 'job number', 'po')),
@@ -121,7 +126,9 @@ export async function POST(request: Request) {
         // still override it.
         scheduledDay: deliveryDate ? weekdayOf(deliveryDate) : null as string | null,
         deliveryDate,
-        deliveryTime: parseDeliveryTime(timeSource),
+        deliveryTime: instructions.deliveryTime ?? parseDeliveryTime(timeSource),
+        specialInstructions,
+        instructions,
         priority: 0,
         importBatch: batchId,
         depot: str(get(r, 'despatch office', 'bkg_despatch', 'depot', 'despatch', 'dispatch office', 'dispatch')),
@@ -139,6 +146,47 @@ export async function POST(request: Request) {
       area: rulesResult[i].area ?? orig.area,
       preferredTruckType: rulesResult[i].preferredTruckType ?? null,
     }))
+
+    // Reconcile day restrictions from special instructions ("closed Fridays",
+    // "Tuesdays only") with whatever the date column / rules decided. A tagged
+    // delivery date stays authoritative — we just flag a clash so the
+    // dispatcher can chase it. For undated orders we narrow the allowed days.
+    const DAY_LABEL = (d: string) => d.charAt(0).toUpperCase() + d.slice(1)
+    const describeRestriction = (p: ParsedInstructions) =>
+      [
+        p.allowedDays?.length ? `${p.allowedDays.map(DAY_LABEL).join('/')} only` : null,
+        p.excludedDays.length ? `not ${p.excludedDays.map(DAY_LABEL).join('/')}` : null,
+      ].filter(Boolean).join(', ')
+    const dayAllowed = (p: ParsedInstructions, d: string) =>
+      !p.excludedDays.includes(d) && (!p.allowedDays || p.allowedDays.includes(d))
+
+    const reconcileDays = (o: (typeof withRules)[number]): { scheduledDay: string | null; notes: string[] } => {
+      const p = o.instructions
+      const notes = p.warnings.map((w) => `[Special instructions: ${w}]`)
+      const restricted = p.excludedDays.length > 0 || (p.allowedDays?.length ?? 0) > 0
+      if (!restricted || o.scheduledDay === 'blocked') return { scheduledDay: o.scheduledDay ?? null, notes }
+
+      if (o.deliveryDate) {
+        const wd = weekdayOf(o.deliveryDate)
+        if (!dayAllowed(p, wd)) {
+          const dd = o.deliveryDate.toISOString().slice(0, 10).split('-').reverse().join('/')
+          notes.push(`[Day clash: booked for ${DAY_LABEL(wd)} ${dd} but instructions say ${describeRestriction(p)}]`)
+        }
+        return { scheduledDay: o.scheduledDay ?? null, notes }
+      }
+
+      if (o.scheduledDay) {
+        const days = o.scheduledDay.split(',').map((d) => d.trim())
+        const kept = days.filter((d) => dayAllowed(p, d))
+        if (kept.length === 0) {
+          notes.push(`[Day clash: rules assigned ${days.map(DAY_LABEL).join('/')} but instructions say ${describeRestriction(p)}]`)
+          return { scheduledDay: o.scheduledDay, notes }
+        }
+        return { scheduledDay: kept.join(','), notes }
+      }
+
+      return { scheduledDay: p.allowedDays?.length ? p.allowedDays.join(',') : null, notes }
+    }
 
     // Bulk geocode all unique postcodes
     const uniquePostcodes = [...new Set(withRules.map((o) => o.postcode).filter(Boolean))]
@@ -207,9 +255,8 @@ export async function POST(request: Request) {
       for (const o of withRules) {
         const geo = geocodedMap.get(o.postcode)
         const { depot: finalDepot, note: overrideNote } = resolveDepot(o.depot, geo)
-        const combinedNotes = overrideNote
-          ? (o.notes ? `${o.notes} ${overrideNote}` : overrideNote)
-          : o.notes
+        const { scheduledDay, notes: instructionNotes } = reconcileDays(o)
+        const combinedNotes = [o.notes, overrideNote, ...instructionNotes].filter(Boolean).join(' ') || null
 
         const order = await tx.order.create({
           data: {
@@ -223,9 +270,13 @@ export async function POST(request: Request) {
             lat: geo?.lat ?? null,
             lng: geo?.lng ?? null,
             status: 'pending',
-            scheduledDay: o.scheduledDay === 'blocked' ? null : o.scheduledDay,
+            scheduledDay: scheduledDay === 'blocked' ? null : scheduledDay,
             deliveryDate: o.deliveryDate,
             deliveryTime: o.deliveryTime,
+            specialInstructions: o.specialInstructions,
+            windowStart: o.instructions.windowStart,
+            windowEnd: o.instructions.windowEnd,
+            instructionFlags: o.instructions.flags.length > 0 ? o.instructions.flags.join(',') : null,
             priority: o.priority,
             importBatch: batchId,
             depot: finalDepot,
@@ -241,6 +292,8 @@ export async function POST(request: Request) {
       imported: created.length,
       batchId,
       geocoded: geocodedMap.size,
+      withInstructions: withRules.filter((o) => o.specialInstructions).length,
+      timeWindows: created.filter((o) => o.windowStart !== null || o.windowEnd !== null || o.deliveryTime).length,
     })
   } catch (err) {
     console.error('Import error:', err)

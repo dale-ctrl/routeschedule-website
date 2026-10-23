@@ -1,5 +1,5 @@
 export interface Condition {
-  field: 'postcode' | 'area' | 'weight' | 'customer' | 'notes' | 'reference' | 'deliveryTime' | 'depot'
+  field: 'postcode' | 'area' | 'weight' | 'customer' | 'notes' | 'reference' | 'deliveryTime' | 'depot' | 'specialInstructions'
   operator: 'eq' | 'ne' | 'contains' | 'starts_with' | 'ends_with' | 'gte' | 'lte' | 'in'
   value: string | number | string[]
 }
@@ -29,6 +29,7 @@ export interface OrderForRules {
   notes?: string | null
   reference?: string | null
   deliveryTime?: string | null
+  specialInstructions?: string | null
   scheduledDay?: string | null
   priority: number
   depot?: string | null

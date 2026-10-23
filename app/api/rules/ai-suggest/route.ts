@@ -10,6 +10,7 @@ Available condition fields:
 - notes: Order notes text
 - reference: Order reference number
 - deliveryTime: "am" or "pm"
+- specialInstructions: Free-text special instructions sales typed on the booking (e.g. "tail lift required", "no HGV")
 - depot: Depot name (e.g. "Plymouth", "Andover")
 
 Available operators: starts_with, contains, eq, ne, ends_with, gte, lte, in

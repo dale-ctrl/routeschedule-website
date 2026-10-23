@@ -5,7 +5,7 @@ import { PageHeader } from '@/components/ui/PageHeader'
 import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
 import { Modal } from '@/components/ui/Modal'
-import { Save, MapPin, CheckCircle, Plus, Pencil, Trash2, Sparkles } from 'lucide-react'
+import { Save, MapPin, CheckCircle, Plus, Pencil, Trash2, Sparkles, Clock } from 'lucide-react'
 
 interface Settings {
   DEPOT_LAT?: string
@@ -13,6 +13,7 @@ interface Settings {
   DEPOT_ADDRESS?: string
   DEFAULT_TRUCK_CAPACITY?: string
   GROQ_API_KEY?: string
+  ROUTE_START_TIME?: string
 }
 
 interface Depot {
@@ -146,6 +147,26 @@ export default function SettingsPage() {
                   <li><strong>Maps</strong> — Leaflet + OpenStreetMap (free, used by Wikipedia &amp; GitHub)</li>
                 </ul>
               </div>
+            </div>
+          </section>
+
+          {/* Routing */}
+          <section className="bg-white rounded-xl border border-gray-200 p-6">
+            <div className="flex items-center gap-2 mb-4">
+              <Clock size={18} className="text-orange-500" />
+              <h2 className="font-semibold text-gray-900">Routing</h2>
+            </div>
+            <div className="space-y-3">
+              <Input
+                label="Driver start time"
+                type="time"
+                value={settings.ROUTE_START_TIME ?? '08:00'}
+                onChange={(e) => setSettings({ ...settings, ROUTE_START_TIME: e.target.value })}
+              />
+              <p className="text-xs text-gray-400">
+                When the first run leaves the depot. Used to work out ETAs, so the route generator can keep AM / PM and
+                &ldquo;before 10&rdquo; style deliveries from special instructions inside their windows. A truck&apos;s Run 2 starts when Run 1 gets back.
+              </p>
             </div>
           </section>
 

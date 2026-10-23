@@ -47,3 +47,6 @@ dev.db
 dev.db-journal
 prisma/dev.db
 prisma/dev.db-journal
+
+# local Turso push helper — contains a hardcoded auth token
+/scripts/push-to-turso.mjs
